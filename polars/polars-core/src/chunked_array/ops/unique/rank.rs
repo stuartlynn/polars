@@ -52,7 +52,7 @@ pub(crate) fn rank(s: &Series, method: RankMethod, reverse: bool) -> Series {
 
     // Currently, nulls tie with the minimum or maximum bound for a type, depending on reverse.
     // TODO: Need to expose nulls_last in argsort to prevent this.
-    if s.has_validity() {
+    if s.null_count() > 0 {
         // Fill using MaxBound/MinBound to keep nulls first.
         let null_strategy = if reverse {
             FillNullStrategy::MaxBound
@@ -116,7 +116,8 @@ pub(crate) fn rank(s: &Series, method: RankMethod, reverse: bool) -> Series {
             // Safety:
             // in bounds
             let arr = unsafe { s.take_unchecked(&sort_idx_ca).unwrap() };
-            let not_consecutive_same = (&arr.slice(1, len - 1))
+            let not_consecutive_same = arr
+                .slice(1, len - 1)
                 .not_equal(&arr.slice(0, len - 1))
                 .unwrap()
                 .rechunk();
@@ -170,7 +171,8 @@ pub(crate) fn rank(s: &Series, method: RankMethod, reverse: bool) -> Series {
             // in bounds
             let arr = unsafe { s.take_unchecked(&sort_idx_ca).unwrap() };
             let validity = arr.chunks()[0].validity().cloned();
-            let not_consecutive_same = (&arr.slice(1, len - 1))
+            let not_consecutive_same = arr
+                .slice(1, len - 1)
                 .not_equal(&arr.slice(0, len - 1))
                 .unwrap()
                 .rechunk();

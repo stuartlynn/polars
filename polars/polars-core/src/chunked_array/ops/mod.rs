@@ -97,7 +97,7 @@ pub trait ChunkAnyValue {
 }
 
 #[cfg(feature = "cum_agg")]
-pub trait ChunkCumAgg<T> {
+pub trait ChunkCumAgg<T: PolarsDataType> {
     /// Get an array with the cumulative max computed at every element
     fn cummax(&self, _reverse: bool) -> ChunkedArray<T> {
         panic!("operation cummax not supported for this dtype")
@@ -117,7 +117,7 @@ pub trait ChunkCumAgg<T> {
 }
 
 /// Traverse and collect every nth element
-pub trait ChunkTakeEvery<T> {
+pub trait ChunkTakeEvery<T: PolarsDataType> {
     /// Traverse and collect every nth element in a new array.
     fn take_every(&self, n: usize) -> ChunkedArray<T>;
 }
@@ -274,24 +274,6 @@ pub trait ChunkSet<'a, A, B> {
     fn set(&'a self, mask: &BooleanChunked, opt_value: Option<A>) -> Result<Self>
     where
         Self: Sized;
-
-    /// Set the values where the mask evaluates to `true` by applying a closure to these values.
-    ///
-    /// # Example
-    ///
-    /// ```rust
-    /// # use polars_core::prelude::*;
-    /// let ca = UInt32Chunked::new("a", &[1, 2, 3]);
-    /// let mask = BooleanChunked::new("mask", &[false, true, false]);
-    /// let new = ca.set_with(&mask, |opt_v| opt_v.map(
-    ///     |v| v * 2
-    /// )).unwrap();
-    /// assert_eq!(Vec::from(&new), &[Some(1), Some(4), Some(3)]);
-    /// ```
-    fn set_with<F>(&'a self, mask: &BooleanChunked, f: F) -> Result<Self>
-    where
-        Self: Sized,
-        F: Fn(Option<A>) -> Option<B>;
 }
 
 /// Cast `ChunkedArray<T>` to `ChunkedArray<N>`
@@ -462,7 +444,7 @@ pub trait ChunkCompare<Rhs> {
 }
 
 /// Get unique values in a `ChunkedArray`
-pub trait ChunkUnique<T> {
+pub trait ChunkUnique<T: PolarsDataType> {
     // We don't return Self to be able to use AutoRef specialization
     /// Get unique values of a ChunkedArray
     fn unique(&self) -> Result<ChunkedArray<T>>;
@@ -508,7 +490,7 @@ pub struct SortOptions {
 }
 
 /// Sort operations on `ChunkedArray`.
-pub trait ChunkSort<T> {
+pub trait ChunkSort<T: PolarsDataType> {
     #[allow(unused_variables)]
     fn sort_with(&self, options: SortOptions) -> ChunkedArray<T>;
 
@@ -585,13 +567,13 @@ pub trait ChunkFullNull {
 }
 
 /// Reverse a ChunkedArray<T>
-pub trait ChunkReverse<T> {
+pub trait ChunkReverse<T: PolarsDataType> {
     /// Return a reversed version of this array.
     fn reverse(&self) -> ChunkedArray<T>;
 }
 
 /// Filter values by a boolean mask.
-pub trait ChunkFilter<T> {
+pub trait ChunkFilter<T: PolarsDataType> {
     /// Filter values in the ChunkedArray with a boolean mask.
     ///
     /// ```rust
@@ -608,7 +590,7 @@ pub trait ChunkFilter<T> {
 }
 
 /// Create a new ChunkedArray filled with values at that index.
-pub trait ChunkExpandAtIndex<T> {
+pub trait ChunkExpandAtIndex<T: PolarsDataType> {
     /// Create a new ChunkedArray filled with values at that index.
     fn expand_at_index(&self, length: usize, index: usize) -> ChunkedArray<T>;
 }
@@ -626,7 +608,7 @@ macro_rules! impl_chunk_expand {
     }};
 }
 
-impl<T> ChunkExpandAtIndex<T> for ChunkedArray<T>
+impl<T: PolarsDataType> ChunkExpandAtIndex<T> for ChunkedArray<T>
 where
     ChunkedArray<T>: ChunkFull<T::Native> + TakeRandom<Item = T::Native>,
     T: PolarsNumericType,
@@ -670,18 +652,18 @@ impl<T: PolarsObject> ChunkExpandAtIndex<ObjectType<T>> for ObjectChunked<T> {
 }
 
 /// Shift the values of a ChunkedArray by a number of periods.
-pub trait ChunkShiftFill<T, V> {
+pub trait ChunkShiftFill<T: PolarsDataType, V> {
     /// Shift the values by a given period and fill the parts that will be empty due to this operation
     /// with `fill_value`.
     fn shift_and_fill(&self, periods: i64, fill_value: V) -> ChunkedArray<T>;
 }
 
-pub trait ChunkShift<T> {
+pub trait ChunkShift<T: PolarsDataType> {
     fn shift(&self, periods: i64) -> ChunkedArray<T>;
 }
 
 /// Combine 2 ChunkedArrays based on some predicate.
-pub trait ChunkZip<T> {
+pub trait ChunkZip<T: PolarsDataType> {
     /// Create a new ChunkedArray with values from self where the mask evaluates `true` and values
     /// from `other` where the mask evaluates `false`
     fn zip_with(&self, mask: &BooleanChunked, other: &ChunkedArray<T>) -> Result<ChunkedArray<T>>;
@@ -775,66 +757,4 @@ pub trait StrConcat {
     ///
     /// * `delimiter` - A string that will act as delimiter between values.
     fn str_concat(&self, delimiter: &str) -> Utf8Chunked;
-}
-
-pub trait ChunkLen {
-    /// Get the length of the ChunkedArray
-    fn len(&self) -> usize;
-
-    /// Check if ChunkedArray is empty.
-    fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-}
-
-pub trait ChunkOps: ChunkLen {
-    /// Aggregate to contiguous memory.
-    #[must_use]
-    fn rechunk(&self) -> Self
-    where
-        Self: std::marker::Sized;
-
-    /// Slice the array. The chunks are reallocated the underlying data slices are zero copy.
-    ///
-    /// When offset is negative it will be counted from the end of the array.
-    /// This method will never error,
-    /// and will slice the best match when offset, or length is out of bounds
-    #[must_use]
-    fn slice(&self, offset: i64, length: usize) -> Self
-    where
-        Self: std::marker::Sized;
-
-    /// Take a view of top n elements
-    #[must_use]
-    fn limit(&self, num_elements: usize) -> Self
-    where
-        Self: Sized,
-    {
-        self.slice(0, num_elements)
-    }
-
-    /// Get the head of the ChunkedArray
-    #[must_use]
-    fn head(&self, length: Option<usize>) -> Self
-    where
-        Self: Sized,
-    {
-        match length {
-            Some(len) => self.slice(0, std::cmp::min(len, self.len())),
-            None => self.slice(0, std::cmp::min(10, self.len())),
-        }
-    }
-
-    /// Get the tail of the ChunkedArray
-    #[must_use]
-    fn tail(&self, length: Option<usize>) -> Self
-    where
-        Self: Sized,
-    {
-        let len = match length {
-            Some(len) => std::cmp::min(len, self.len()),
-            None => std::cmp::min(10, self.len()),
-        };
-        self.slice(-(len as i64), len)
-    }
 }

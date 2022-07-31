@@ -62,7 +62,7 @@ impl Series {
             #[cfg(feature = "dtype-categorical")]
             Categorical(rev_map) => {
                 let cats = UInt32Chunked::from_chunks(name, chunks);
-                CategoricalChunked::from_cats_and_rev_map(cats, rev_map.clone().unwrap())
+                CategoricalChunked::from_cats_and_rev_map_unchecked(cats, rev_map.clone().unwrap())
                     .into_series()
             }
             Boolean => BooleanChunked::from_chunks(name, chunks).into_series(),
@@ -93,7 +93,7 @@ impl Series {
                 let chunks = cast_chunks(&chunks, &DataType::Utf8, false).unwrap();
                 Ok(Utf8Chunked::from_chunks(name, chunks).into_series())
             }
-            ArrowDataType::List(_) => {
+            ArrowDataType::List(_) | ArrowDataType::LargeList(_) => {
                 let chunks = chunks.iter().map(convert_inner_types).collect();
                 Ok(ListChunked::from_chunks(name, chunks).into_series())
             }
@@ -176,10 +176,6 @@ impl Series {
                     ArrowTimeUnit::Microsecond => &s * 1_000,
                     ArrowTimeUnit::Nanosecond => s,
                 })
-            }
-            ArrowDataType::LargeList(_) => {
-                let chunks = chunks.iter().map(convert_inner_types).collect();
-                Ok(ListChunked::from_chunks(name, chunks).into_series())
             }
             ArrowDataType::Null => {
                 // we don't support null types yet so we use a small digit type filled with nulls

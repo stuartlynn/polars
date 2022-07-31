@@ -4,9 +4,7 @@ use crate::dataframe::PyDataFrame;
 use crate::error::PyPolarsErr;
 use crate::file::get_file_like;
 use crate::lazy::{dsl::PyExpr, utils::py_exprs_to_exprs};
-use crate::prelude::{
-    IdxSize, LogicalPlan, NullValues, ParallelStrategy, ScanArgsIpc, ScanArgsParquet,
-};
+use crate::prelude::*;
 use polars::io::RowCount;
 use polars::lazy::frame::{AllowedOptimizations, LazyCsvReader, LazyFrame, LazyGroupBy};
 use polars::lazy::prelude::col;
@@ -14,9 +12,7 @@ use polars::prelude::{ClosedWindow, CsvEncoding, DataFrame, Field, JoinType, Sch
 use polars::time::*;
 use polars_core::frame::explode::MeltArgs;
 use polars_core::frame::UniqueKeepStrategy;
-use polars_core::prelude::{
-    AnyValue, AsOfOptions, AsofStrategy, DataType, QuantileInterpolOptions, SortOptions,
-};
+use polars_core::prelude::*;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
@@ -88,6 +84,13 @@ pub struct PyLazyFrame {
     pub ldf: LazyFrame,
 }
 
+impl PyLazyFrame {
+    fn get_schema(&self) -> PyResult<SchemaRef> {
+        let schema = self.ldf.schema().map_err(PyPolarsErr::from)?;
+        Ok(schema)
+    }
+}
+
 impl From<LazyFrame> for PyLazyFrame {
     fn from(ldf: LazyFrame) -> Self {
         PyLazyFrame { ldf }
@@ -97,6 +100,7 @@ impl From<LazyFrame> for PyLazyFrame {
 #[pymethods]
 #[allow(clippy::should_implement_trait)]
 impl PyLazyFrame {
+    #[cfg(all(feature = "json", feature = "serde_json"))]
     pub fn to_json(&self, py_f: PyObject) -> PyResult<()> {
         let file = BufWriter::new(get_file_like(py_f, true)?);
         serde_json::to_writer(file, &self.ldf.logical_plan)
@@ -149,11 +153,13 @@ impl PyLazyFrame {
         encoding: &str,
         row_count: Option<(String, IdxSize)>,
         parse_dates: bool,
+        eol_char: &str,
     ) -> PyResult<Self> {
         let null_values = null_values.map(|w| w.0);
         let comment_char = comment_char.map(|s| s.as_bytes()[0]);
         let quote_char = quote_char.map(|s| s.as_bytes()[0]);
         let delimiter = sep.as_bytes()[0];
+        let eol_char = eol_char.as_bytes()[0];
 
         let row_count = row_count.map(|(name, offset)| RowCount { name, offset });
 
@@ -185,6 +191,7 @@ impl PyLazyFrame {
             .low_memory(low_memory)
             .with_comment_char(comment_char)
             .with_quote_char(quote_char)
+            .with_end_of_line_char(eol_char)
             .with_rechunk(rechunk)
             .with_skip_rows_after_header(skip_rows_after_header)
             .with_encoding(encoding)
@@ -218,8 +225,8 @@ impl PyLazyFrame {
         Ok(r.finish().map_err(PyPolarsErr::from)?.into())
     }
 
-    #[staticmethod]
     #[cfg(feature = "parquet")]
+    #[staticmethod]
     pub fn new_from_parquet(
         path: String,
         n_rows: Option<usize>,
@@ -227,6 +234,7 @@ impl PyLazyFrame {
         parallel: Wrap<ParallelStrategy>,
         rechunk: bool,
         row_count: Option<(String, IdxSize)>,
+        low_memory: bool,
     ) -> PyResult<Self> {
         let row_count = row_count.map(|(name, offset)| RowCount { name, offset });
         let args = ScanArgsParquet {
@@ -235,11 +243,13 @@ impl PyLazyFrame {
             parallel: parallel.0,
             rechunk,
             row_count,
+            low_memory,
         };
         let lf = LazyFrame::scan_parquet(path, args).map_err(PyPolarsErr::from)?;
         Ok(lf.into())
     }
 
+    #[cfg(feature = "ipc")]
     #[staticmethod]
     pub fn new_from_ipc(
         path: String,
@@ -441,6 +451,7 @@ impl PyLazyFrame {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[cfg(feature = "asof_join")]
     pub fn join_asof(
         &self,
         other: PyLazyFrame,
@@ -458,7 +469,7 @@ impl PyLazyFrame {
         let strategy = match strategy {
             "forward" => AsofStrategy::Forward,
             "backward" => AsofStrategy::Backward,
-            _ => panic!("expected on of {{'forward', 'backward'}}"),
+            _ => panic!("expected one of {{'forward', 'backward'}}"),
         };
 
         let ldf = self.ldf.clone();
@@ -502,6 +513,7 @@ impl PyLazyFrame {
             "outer" => JoinType::Outer,
             "semi" => JoinType::Semi,
             "anti" => JoinType::Anti,
+            #[cfg(feature = "asof_join")]
             "asof" => JoinType::AsOf(AsOfOptions {
                 strategy: AsofStrategy::Backward,
                 left_by: if asof_by_left.is_empty() {
@@ -736,20 +748,20 @@ impl PyLazyFrame {
         self.ldf.clone().into()
     }
 
-    pub fn columns(&self) -> Vec<String> {
-        self.ldf.schema().iter_names().cloned().collect()
+    pub fn columns(&self) -> PyResult<Vec<String>> {
+        Ok(self.get_schema()?.iter_names().cloned().collect())
     }
 
-    pub fn dtypes(&self, py: Python) -> PyObject {
-        let schema = self.ldf.schema();
+    pub fn dtypes(&self, py: Python) -> PyResult<PyObject> {
+        let schema = self.get_schema()?;
         let iter = schema
             .iter_dtypes()
             .map(|dt| Wrap(dt.clone()).to_object(py));
-        PyList::new(py, iter).to_object(py)
+        Ok(PyList::new(py, iter).to_object(py))
     }
 
-    pub fn schema(&self, py: Python) -> PyObject {
-        let schema = self.ldf.schema();
+    pub fn schema(&self, py: Python) -> PyResult<PyObject> {
+        let schema = self.get_schema()?;
         let schema_dict = PyDict::new(py);
 
         schema.iter_fields().for_each(|fld| {
@@ -757,7 +769,7 @@ impl PyLazyFrame {
                 .set_item(fld.name(), Wrap(fld.data_type().clone()))
                 .unwrap()
         });
-        schema_dict.to_object(py)
+        Ok(schema_dict.to_object(py))
     }
 
     pub fn unnest(&self, cols: Vec<String>) -> PyLazyFrame {

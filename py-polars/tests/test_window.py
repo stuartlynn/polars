@@ -98,13 +98,13 @@ def test_window_function_cache() -> None:
 
 def test_arange_no_rows() -> None:
     df = pl.DataFrame(dict(x=[5, 5, 4, 4, 2, 2]))
-    out = df.with_column(pl.arange(0, pl.count()).over("x"))  # type: ignore
+    out = df.with_column(pl.arange(0, pl.count()).over("x"))  # type: ignore[union-attr]
     assert out.frame_equal(
         pl.DataFrame({"x": [5, 5, 4, 4, 2, 2], "literal": [0, 1, 0, 1, 0, 1]})
     )
 
     df = pl.DataFrame(dict(x=[]))
-    out = df.with_column(pl.arange(0, pl.count()).over("x"))  # type: ignore
+    out = df.with_column(pl.arange(0, pl.count()).over("x"))  # type: ignore[union-attr]
     assert out.frame_equal(pl.DataFrame({"x": [], "literal": []}))
 
 
@@ -116,14 +116,11 @@ def test_no_panic_on_nan_3067() -> None:
         }
     )
 
-    df.select([pl.col("total").shift().over("group")])["total"].to_list() == [
-        None,
-        1.0,
-        2.0,
-        None,
-        4.0,
-        5.0,
-    ]
+    expected = [None, 1.0, 2.0, None, 4.0, 5.0]
+    assert (
+        df.select([pl.col("total").shift().over("group")])["total"].to_list()
+        == expected
+    )
 
 
 def test_quantile_as_window() -> None:
@@ -172,3 +169,25 @@ def test_count_window() -> None:
         .with_column(pl.count().over("a"))["count"]
         .to_list()
     ) == [2, 2, 1]
+
+
+def test_window_cached_keys_sorted_update_4183() -> None:
+    df = pl.DataFrame(
+        {
+            "customer_ID": [
+                "0",
+                "0",
+                "1",
+            ],
+            "date": [1, 2, 3],
+        }
+    )
+    assert df.sort(by=["customer_ID", "date"]).select(
+        [
+            pl.count("date").over(pl.col("customer_ID")).alias("count"),
+            pl.col("date")
+            .rank(method="ordinal")
+            .over(pl.col("customer_ID"))
+            .alias("rank"),
+        ]
+    ).to_dict(False) == {"count": [2, 2, 1], "rank": [1, 2, 1]}

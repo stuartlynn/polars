@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import io
 
+import pytest
+
 import polars as pl
 
 
@@ -146,8 +148,8 @@ def test_categorical_describe_3487() -> None:
 
 def test_categorical_is_in_list() -> None:
     # this requires type coercion to cast.
-    # we should not cast within the function as this would be expensive within a groupby context
-    # that would be a cast per group
+    # we should not cast within the function as this would be expensive within a groupby
+    # context that would be a cast per group
     with pl.StringCache():
         df = pl.DataFrame(
             {"a": [1, 2, 3, 1, 2], "b": ["a", "b", "c", "d", "e"]}
@@ -175,3 +177,20 @@ def test_unset_sorted_on_append() -> None:
     ).sort("key")
     df = pl.concat([df1, df2], rechunk=False)
     assert df.groupby("key").count()["count"].to_list() == [4, 4]
+
+
+def test_categorical_error_on_local_cmp() -> None:
+    df_cat = pl.DataFrame(
+        [
+            pl.Series("a_cat", ["c", "a", "b", "c", "b"], dtype=pl.Categorical),
+            pl.Series("b_cat", ["F", "G", "E", "G", "G"], dtype=pl.Categorical),
+        ]
+    )
+    with pytest.raises(
+        pl.ComputeError,
+        match=(
+            "Cannot compare categoricals originating from different sources. Consider"
+            " setting a global string cache."
+        ),
+    ):
+        df_cat.filter(pl.col("a_cat") == pl.col("b_cat"))

@@ -12,6 +12,11 @@ impl IntoSeries for StructChunked {
 impl PrivateSeriesNumeric for SeriesWrap<StructChunked> {}
 
 impl private::PrivateSeries for SeriesWrap<StructChunked> {
+    fn compute_len(&mut self) {
+        for s in self.0.fields_mut() {
+            s._get_inner_mut().compute_len();
+        }
+    }
     fn _field(&self) -> Cow<Field> {
         Cow::Borrowed(self.0.ref_field())
     }
@@ -313,6 +318,12 @@ impl SeriesTrait for SeriesWrap<StructChunked> {
     fn is_not_null(&self) -> BooleanChunked {
         let is_not_null = self.0.fields().iter().map(|s| s.is_not_null());
         is_not_null.reduce(|lhs, rhs| lhs.bitand(rhs)).unwrap()
+    }
+
+    fn shrink_to_fit(&mut self) {
+        self.0.fields_mut().iter_mut().for_each(|s| {
+            s.shrink_to_fit();
+        });
     }
 
     fn reverse(&self) -> Series {

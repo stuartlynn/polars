@@ -1,6 +1,4 @@
-"""
-Module for formatting output data in HTML.
-"""
+"""Module for formatting output data in HTML."""
 from __future__ import annotations
 
 import os
@@ -12,6 +10,8 @@ from polars.datatypes import Object
 
 
 class Tag:
+    """Class for representing an HTML tag."""
+
     def __init__(
         self,
         elements: list[str],
@@ -42,7 +42,12 @@ class Tag:
 
 
 class HTMLFormatter:
-    def __init__(self, df: DataFrame, max_cols: int = 75, max_rows: int = 40):  # type: ignore  # noqa
+    def __init__(
+        self,
+        df: DataFrame,  # type: ignore[name-defined] # noqa: F821
+        max_cols: int = 75,
+        max_rows: int = 40,
+    ):
         self.df = df
         self.elements: list[str] = []
         self.max_cols = max_cols
@@ -67,9 +72,7 @@ class HTMLFormatter:
             self.col_idx = range(0, df.width)
 
     def write_header(self) -> None:
-        """
-        Writes the header of an HTML table.
-        """
+        """Write the header of an HTML table."""
         self.elements.append(f"<small>shape: {self.df.shape}</small>")
         with Tag(self.elements, "thead"):
             with Tag(self.elements, "tr"):
@@ -90,9 +93,7 @@ class HTMLFormatter:
                             self.elements.append(dtypes[c])
 
     def write_body(self) -> None:
-        """
-        Writes the body of an HTML table.
-        """
+        """Write the body of an HTML table."""
         str_lengths = int(os.environ.get("POLARS_FMT_STR_LEN", "15"))
         with Tag(self.elements, "tbody"):
             for r in self.row_idx:
@@ -124,9 +125,11 @@ class HTMLFormatter:
 
 class NotebookFormatter(HTMLFormatter):
     """
-    Internal class for formatting output data in html for display in Jupyter
-    Notebooks. This class is intended for functionality specific to
-    DataFrame._repr_html_() and DataFrame.to_html(notebook=True)
+    Class for formatting output data in HTML for display in Jupyter Notebooks.
+
+    This class is intended for functionality specific to DataFrame._repr_html_()
+    and DataFrame.to_html(notebook=True).
+
     """
 
     def write_style(self) -> None:
@@ -148,19 +151,33 @@ class NotebookFormatter(HTMLFormatter):
             ("tbody tr th", "vertical-align", "top"),
             ("thead th", "text-align", "right"),
             ("td", "white-space", "pre"),
-            ("td", "line-height", "95%"),
             ("td", "padding-top", "0"),
             ("td", "padding-bottom", "0"),
         ]
+        # vs code cannot deal with that css line
+        # see #4102
+        if not in_vscode_notebook():
+            element_props.append(("td", "line-height", "95%"))
+
         template_mid = "\n\n".join(map(lambda t: template_select % t, element_props))
         template = dedent("\n".join((template_first, template_mid, template_last)))
         self.write(template)
 
     def render(self) -> list[str]:
-        """
-        Return the lines needed to render a HTML table.
-        """
+        """Return the lines needed to render a HTML table."""
         with Tag(self.elements, "div"):
             self.write_style()
             super().render()
         return self.elements
+
+
+def in_vscode_notebook() -> bool:
+    try:
+        # autoimported by notebooks
+        get_ipython()  # type: ignore[name-defined]
+        os.environ["VSCODE_CWD"]
+    except NameError:
+        return False  # not in notebook
+    except KeyError:
+        return False  # not in VSCode
+    return True

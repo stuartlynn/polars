@@ -613,8 +613,8 @@ def test_fill_nan() -> None:
         .collect()["a"]
         .series_equal(pl.Series("a", [1.0, 2.0, 3.0]))
     )
-    assert df.select(pl.col("a").fill_nan(2))["literal"].series_equal(
-        pl.Series("literal", [1.0, 2.0, 3.0])
+    assert df.select(pl.col("a").fill_nan(2))["a"].series_equal(
+        pl.Series("a", [1.0, 2.0, 3.0])
     )
 
 
@@ -643,7 +643,14 @@ def test_take(fruits_cars: pl.DataFrame) -> None:
 
     for index in [[0, 1], pl.Series([0, 1]), np.array([0, 1])]:
         out = df.sort("fruits").select(
-            [col("B").reverse().take(index).list().over("fruits"), "fruits"]  # type: ignore
+            [
+                col("B")
+                .reverse()
+                .take(index)  # type: ignore[arg-type]
+                .list()
+                .over("fruits"),
+                "fruits",
+            ]
         )
 
         assert out[0, "B"] == [2, 3]
@@ -872,7 +879,7 @@ def test_arithmetic() -> None:
 
 def test_ufunc() -> None:
     df = pl.DataFrame({"a": [1, 2]})
-    out = df.select(np.log(col("a")))  # type: ignore
+    out = df.select(np.log(col("a")))  # type: ignore[call-overload]
     assert out["a"][1] == 0.6931471805599453
 
 
@@ -1108,25 +1115,46 @@ def test_quantile(fruits_cars: pl.DataFrame) -> None:
 
 
 def test_is_between(fruits_cars: pl.DataFrame) -> None:
-    assert fruits_cars.select(pl.col("A").is_between(2, 4))["is_between"].series_equal(  # type: ignore
+    result = fruits_cars.select(pl.col("A").is_between(2, 4))["is_between"]
+    assert result.series_equal(
         pl.Series("is_between", [False, False, True, False, False])
     )
-    assert fruits_cars.select(pl.col("A").is_between(2, 4, False))["is_between"].series_equal(  # type: ignore
+
+    result = fruits_cars.select(pl.col("A").is_between(2, 4, False))["is_between"]
+    assert result.series_equal(
         pl.Series("is_between", [False, False, True, False, False])
     )
-    assert fruits_cars.select(pl.col("A").is_between(2, 4, [False, False]))["is_between"].series_equal(  # type: ignore
+
+    result = fruits_cars.select(pl.col("A").is_between(2, 4, [False, False]))[
+        "is_between"
+    ]
+    assert result.series_equal(
         pl.Series("is_between", [False, False, True, False, False])
     )
-    assert fruits_cars.select(pl.col("A").is_between(2, 4, True))["is_between"].series_equal(  # type: ignore
+
+    result = fruits_cars.select(pl.col("A").is_between(2, 4, True))["is_between"]
+    assert result.series_equal(
         pl.Series("is_between", [False, True, True, True, False])
     )
-    assert fruits_cars.select(pl.col("A").is_between(2, 4, [True, True]))["is_between"].series_equal(  # type: ignore
+
+    result = fruits_cars.select(pl.col("A").is_between(2, 4, [True, True]))[
+        "is_between"
+    ]
+    assert result.series_equal(
         pl.Series("is_between", [False, True, True, True, False])
     )
-    assert fruits_cars.select(pl.col("A").is_between(2, 4, [False, True]))["is_between"].series_equal(  # type: ignore
+
+    result = fruits_cars.select(pl.col("A").is_between(2, 4, [False, True]))[
+        "is_between"
+    ]
+    assert result.series_equal(
         pl.Series("is_between", [False, False, True, True, False])
     )
-    assert fruits_cars.select(pl.col("A").is_between(2, 4, [True, False]))["is_between"].series_equal(  # type: ignore
+
+    result = fruits_cars.select(pl.col("A").is_between(2, 4, [True, False]))[
+        "is_between"
+    ]
+    assert result.series_equal(
         pl.Series("is_between", [False, True, True, False, False])
     )
 
@@ -1220,8 +1248,7 @@ def test_self_join() -> None:
 
 
 def test_preservation_of_subclasses() -> None:
-    """Tests for LazyFrame inheritance."""
-
+    """Test for LazyFrame inheritance."""
     # We should be able to inherit from polars.LazyFrame
     class SubClassedLazyFrame(pl.LazyFrame):
         pass
@@ -1352,3 +1379,28 @@ def test_explode_inner_lists_3985() -> None:
         .agg(pl.col("categories"))
         .with_column(pl.col("categories").arr.eval(pl.element().explode()))
     ).collect().to_dict(False) == {"id": [1], "categories": [["a", "b", "a", "c"]]}
+
+
+def test_lazy_method() -> None:
+    # We want to support `.lazy()` on a Lazy DataFrame as to allow more generic user
+    # code.
+    df = pl.DataFrame({"a": [1, 1, 2, 2, 3, 3], "b": [1, 2, 3, 4, 5, 6]})
+    lazy_df = df.lazy()
+
+    assert lazy_df.lazy() == lazy_df
+
+
+def test_update_schema_after_projection_pd_t4157() -> None:
+    assert pl.DataFrame({"c0": [], "c1": [], "c2": []}).lazy().rename(
+        {
+            "c2": "c2_",
+        }
+    ).drop("c2_").select(pl.col("c0")).collect().columns == ["c0"]
+
+
+def test_type_coercion_unknown_4190() -> None:
+    assert (
+        pl.DataFrame({"a": [1, 2, 3], "b": [1, 2, 3]})
+        .lazy()
+        .with_columns([pl.col("a") & pl.col("a").fill_null(True)])
+    ).collect().shape == (3, 2)

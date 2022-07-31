@@ -195,8 +195,11 @@ impl PyExpr {
     pub fn count(&self) -> PyExpr {
         self.clone().inner.count().into()
     }
-    pub fn value_counts(&self, multithreaded: bool) -> PyExpr {
-        self.inner.clone().value_counts(multithreaded).into()
+    pub fn value_counts(&self, multithreaded: bool, sorted: bool) -> PyExpr {
+        self.inner
+            .clone()
+            .value_counts(multithreaded, sorted)
+            .into()
     }
     pub fn unique_counts(&self) -> PyExpr {
         self.inner.clone().unique_counts().into()
@@ -363,6 +366,71 @@ impl PyExpr {
         self.clone().inner.abs().into()
     }
 
+    #[cfg(feature = "trigonometry")]
+    pub fn sin(&self) -> PyExpr {
+        self.clone().inner.sin().into()
+    }
+
+    #[cfg(feature = "trigonometry")]
+    pub fn cos(&self) -> PyExpr {
+        self.clone().inner.cos().into()
+    }
+
+    #[cfg(feature = "trigonometry")]
+    pub fn tan(&self) -> PyExpr {
+        self.clone().inner.tan().into()
+    }
+
+    #[cfg(feature = "trigonometry")]
+    pub fn arcsin(&self) -> PyExpr {
+        self.clone().inner.arcsin().into()
+    }
+
+    #[cfg(feature = "trigonometry")]
+    pub fn arccos(&self) -> PyExpr {
+        self.clone().inner.arccos().into()
+    }
+
+    #[cfg(feature = "trigonometry")]
+    pub fn arctan(&self) -> PyExpr {
+        self.clone().inner.arctan().into()
+    }
+
+    #[cfg(feature = "trigonometry")]
+    pub fn sinh(&self) -> PyExpr {
+        self.clone().inner.sinh().into()
+    }
+
+    #[cfg(feature = "trigonometry")]
+    pub fn cosh(&self) -> PyExpr {
+        self.clone().inner.cosh().into()
+    }
+
+    #[cfg(feature = "trigonometry")]
+    pub fn tanh(&self) -> PyExpr {
+        self.clone().inner.tanh().into()
+    }
+
+    #[cfg(feature = "trigonometry")]
+    pub fn arcsinh(&self) -> PyExpr {
+        self.clone().inner.arcsinh().into()
+    }
+
+    #[cfg(feature = "trigonometry")]
+    pub fn arccosh(&self) -> PyExpr {
+        self.clone().inner.arccosh().into()
+    }
+
+    #[cfg(feature = "trigonometry")]
+    pub fn arctanh(&self) -> PyExpr {
+        self.clone().inner.arctanh().into()
+    }
+
+    #[cfg(feature = "sign")]
+    pub fn sign(&self) -> PyExpr {
+        self.clone().inner.sign().into()
+    }
+
     pub fn is_duplicated(&self) -> PyExpr {
         self.clone().inner.is_duplicated().into()
     }
@@ -391,6 +459,7 @@ impl PyExpr {
         self.clone().inner.is_in(expr.inner).into()
     }
 
+    #[cfg(feature = "repeat_by")]
     pub fn repeat_by(&self, by: PyExpr) -> PyExpr {
         self.clone().inner.repeat_by(by.inner).into()
     }
@@ -543,10 +612,14 @@ impl PyExpr {
             .into()
     }
 
-    pub fn str_replace(&self, pat: String, val: String) -> PyExpr {
+    pub fn str_replace(&self, pat: String, val: String, literal: Option<bool>) -> PyExpr {
         let function = move |s: Series| {
             let ca = s.utf8()?;
-            match ca.replace(&pat, &val) {
+            let replaced = match literal {
+                Some(true) => ca.replace_literal(&pat, &val),
+                _ => ca.replace(&pat, &val),
+            };
+            match replaced {
                 Ok(ca) => Ok(ca.into_series()),
                 Err(e) => Err(PolarsError::ComputeError(format!("{:?}", e).into())),
             }
@@ -558,10 +631,14 @@ impl PyExpr {
             .into()
     }
 
-    pub fn str_replace_all(&self, pat: String, val: String) -> PyExpr {
+    pub fn str_replace_all(&self, pat: String, val: String, literal: Option<bool>) -> PyExpr {
         let function = move |s: Series| {
             let ca = s.utf8()?;
-            match ca.replace_all(&pat, &val) {
+            let replaced = match literal {
+                Some(true) => ca.replace_literal_all(&pat, &val),
+                _ => ca.replace_all(&pat, &val),
+            };
+            match replaced {
                 Ok(ca) => Ok(ca.into_series()),
                 Err(e) => Err(PolarsError::ComputeError(format!("{:?}", e).into())),
             }
@@ -1315,6 +1392,7 @@ impl PyExpr {
         self.inner.clone().diff(n, null_behavior).into()
     }
 
+    #[cfg(feature = "pct_change")]
     fn pct_change(&self, n: usize) -> Self {
         self.inner.clone().pct_change(n).into()
     }
@@ -1463,8 +1541,8 @@ impl PyExpr {
     pub fn entropy(&self, base: f64, normalize: bool) -> Self {
         self.inner.clone().entropy(base, normalize).into()
     }
-    pub fn hash(&self, seed: usize) -> Self {
-        self.inner.clone().hash(seed).into()
+    pub fn hash(&self, seed: u64, seed_1: u64, seed_2: u64, seed_3: u64) -> Self {
+        self.inner.clone().hash(seed, seed_1, seed_2, seed_3).into()
     }
 }
 

@@ -86,7 +86,6 @@ Aggregation
     Expr.list
     Expr.max
     Expr.mean
-    Expr.mean
     Expr.median
     Expr.min
     Expr.product
@@ -123,10 +122,14 @@ Computations
 
     Expr.abs
     Expr.arccos
+    Expr.arccosh
     Expr.arcsin
+    Expr.arcsinh
     Expr.arctan
+    Expr.arctanh
     Expr.arg_unique
     Expr.cos
+    Expr.cosh
     Expr.cumcount
     Expr.cummax
     Expr.cummin
@@ -162,9 +165,11 @@ Computations
     Expr.rolling_var
     Expr.sign
     Expr.sin
+    Expr.sinh
     Expr.skew
     Expr.sqrt
     Expr.tan
+    Expr.tanh
     Expr.unique
     Expr.unique_counts
     Expr.value_counts

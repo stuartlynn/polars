@@ -19,7 +19,7 @@ jobs:
       - name: Install latest Rust nightly
         uses: actions-rs/toolchain@v1
         with:
-          toolchain: nightly-2022-06-22
+          toolchain: nightly-2022-07-24
           override: true
           components: rustfmt, clippy
       - name: Setup universal2 targets for Rust
@@ -35,15 +35,15 @@ jobs:
           rm py-polars/README.md
           cp README.md py-polars/README.md
           cd py-polars
-          rustup override set nightly-2022-06-22
+          rustup override set nightly-2022-07-24
       - name: maturin publish
         uses: messense/maturin-action@v1
         env:
           MATURIN_PASSWORD: ${{ secrets.PYPI_PASS }}
         with:
-          maturin-version: 0.12.1
+          maturin-version: '0.13.0'
           command: publish
-          args: -m py-polars/Cargo.toml --target aarch64-apple-darwin --no-sdist -o wheels -i python -u ritchie46
+          args: -m py-polars/Cargo.toml --no-default-features --features=all --target aarch64-apple-darwin --no-sdist -o wheels -i python -u ritchie46
            # uncomment to build a universal2 wheel
            # we don't run it because it is twice as big and not needed because we build
            # for both architectures separately

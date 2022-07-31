@@ -1,6 +1,6 @@
 [package]
 name = "py-polars"
-version = "0.13.54"
+version = "0.13.58"
 authors = ["ritchie46 <ritchie46@gmail.com>"]
 documentation = "https://pola-rs.github.io/polars/py-polars/html/reference/index.html"
 edition = "2021"
@@ -24,6 +24,7 @@ jemallocator = { version = "0.5", features = ["disable_initial_exec_tls"] }
 [dependencies]
 ahash = "0.7"
 bincode = "1.3"
+# todo: unfix when compilation problem is solved
 libc = "0.2"
 ndarray = "0.15"
 numpy = "0.16"
@@ -41,8 +42,37 @@ parquet = ["polars/parquet"]
 ipc = ["polars/ipc"]
 is_in = ["polars/is_in"]
 json = ["polars/serde", "serde_json"]
+trigonometry = ["polars/trigonometry"]
+sign = ["polars/sign"]
+asof_join = ["polars/asof_join"]
+cross_join = ["polars/cross_join"]
+pct_change = ["polars/pct_change"]
+repeat_by = ["polars/repeat_by"]
+simd = ["polars/simd"]
 
-default = ["json", "parquet", "ipc", "avro", "is_in", "json", "polars/repeat_by"]
+all = [
+  "json",
+  "parquet",
+  "ipc",
+  "avro",
+  "is_in",
+  "json",
+  "repeat_by",
+  "trigonometry",
+  "sign",
+  "asof_join",
+  "cross_join",
+  "pct_change",
+]
+
+# we cannot conditionaly activate simd
+# https://github.com/rust-lang/cargo/issues/1197
+# so we have an indirection and compile
+# with --no-default-features --features=all for targets without simd
+default = [
+  "all",
+  "simd",
+]
 
 [dependencies.polars]
 path = "../polars"
@@ -50,7 +80,6 @@ default-features = false
 features = [
   "dynamic_groupby",
   "zip_with",
-  "simd",
   "lazy",
   "strings",
   "temporal",
@@ -64,8 +93,6 @@ features = [
   "private",
   "round_series",
   "is_first",
-  "asof_join",
-  "cross_join",
   "dot_product",
   "concat_str",
   "row_hash",
@@ -81,7 +108,6 @@ features = [
   "list",
   "rank",
   "diff",
-  "pct_change",
   "moment",
   "arange",
   "true_div",

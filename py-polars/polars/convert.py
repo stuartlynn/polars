@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 import warnings
 from typing import Any, Mapping, Sequence, overload
 
@@ -9,22 +10,27 @@ try:
     import numpy as np
 
     _NUMPY_AVAILABLE = True
-except ImportError:  # pragma: no cover
+except ImportError:
     _NUMPY_AVAILABLE = False
 
 try:
     import pyarrow as pa
 
     _PYARROW_AVAILABLE = True
-except ImportError:  # pragma: no cover
+except ImportError:
     _PYARROW_AVAILABLE = False
 
 try:
     import pandas as pd
 
     _PANDAS_AVAILABLE = True
-except ImportError:  # pragma: no cover
+except ImportError:
     _PANDAS_AVAILABLE = False
+
+if sys.version_info >= (3, 8):
+    from typing import Literal
+else:
+    from typing_extensions import Literal  # pragma: no cover
 
 
 def from_dict(
@@ -64,7 +70,7 @@ def from_dict(
     └─────┴─────┘
 
     """
-    return DataFrame._from_dict(data=data, columns=columns)  # type: ignore
+    return DataFrame._from_dict(data=data, columns=columns)  # type: ignore[arg-type]
 
 
 def from_dicts(
@@ -110,17 +116,17 @@ def from_dicts(
 def from_records(
     data: Sequence[Sequence[Any]],
     columns: Sequence[str] | None = None,
-    orient: str | None = None,
+    orient: Literal["col", "row"] | None = None,
 ) -> DataFrame:
     """
-    Construct a DataFrame from a numpy ndarray or sequence of sequences.
+    Construct a DataFrame from a sequence of sequences.
 
     Note that this is slower than creating from columnar memory.
 
     Parameters
     ----------
-    data : numpy ndarray or Sequence of sequences
-        Two-dimensional data represented as numpy ndarray or sequence of sequences.
+    data : Sequence of sequences
+        Two-dimensional data represented as a sequence of sequences.
     columns : Sequence of str, default None
         Column labels to use for resulting DataFrame. Must match data dimensions.
         If not specified, columns will be named `column_0`, `column_1`, etc.
@@ -166,7 +172,7 @@ def from_records(
 def from_numpy(
     data: np.ndarray,
     columns: Sequence[str] | None = None,
-    orient: str | None = None,
+    orient: Literal["col", "row"] | None = None,
 ) -> DataFrame:
     """
     Construct a DataFrame from a numpy ndarray.

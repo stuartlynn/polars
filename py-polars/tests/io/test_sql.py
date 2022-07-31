@@ -11,7 +11,7 @@ def test_read_sql() -> None:
     import tempfile
 
     try:
-        import connectorx  # noqa
+        import connectorx  # noqa: F401
 
         with tempfile.TemporaryDirectory() as tmpdir_name:
             test_db = os.path.join(tmpdir_name, "test.db")
@@ -24,7 +24,8 @@ def test_read_sql() -> None:
                     value FLOAT,
                     date  DATE
                 );
-                INSERT INTO test_data(name,value,date) VALUES ('misc',100.0,'2020-01-01'), ('other',-99.5,'2021-12-31');
+                INSERT INTO test_data(name,value,date)
+                VALUES ('misc',100.0,'2020-01-01'), ('other',-99.5,'2021-12-31');
                 """
             )
             conn.close()

@@ -1,4 +1,3 @@
-# flake8: noqa: W191,E101
 from __future__ import annotations
 
 import gzip
@@ -13,6 +12,7 @@ import pytest
 
 import polars as pl
 from polars import DataType
+from polars.testing import assert_frame_equal_local_categoricals
 
 
 def test_quoted_date() -> None:
@@ -39,7 +39,7 @@ def test_to_from_buffer(df_no_lists: pl.DataFrame) -> None:
     read_df = read_df.with_columns(
         [pl.col("cat").cast(pl.Categorical), pl.col("time").cast(pl.Time)]
     )
-    assert df.frame_equal(read_df)
+    assert_frame_equal_local_categoricals(df, read_df)
 
 
 def test_to_from_file(io_test_dir: str, df_no_lists: pl.DataFrame) -> None:
@@ -54,11 +54,11 @@ def test_to_from_file(io_test_dir: str, df_no_lists: pl.DataFrame) -> None:
     read_df = read_df.with_columns(
         [pl.col("cat").cast(pl.Categorical), pl.col("time").cast(pl.Time)]
     )
-    assert df.frame_equal(read_df)
+    assert_frame_equal_local_categoricals(df, read_df)
 
 
 def test_read_web_file() -> None:
-    url = "https://raw.githubusercontent.com/pola-rs/polars/master/examples/datasets/foods1.csv"
+    url = "https://raw.githubusercontent.com/pola-rs/polars/master/examples/datasets/foods1.csv"  # noqa: E501
     df = pl.read_csv(url)
     assert df.shape == (27, 4)
 
@@ -572,3 +572,38 @@ def test_csv_multiple_null_values() -> None:
     )
 
     assert df2.frame_equal(expected)
+
+
+def test_different_eol_char() -> None:
+    csv = "a,1,10;b,2,20;c,3,30"
+    expected = pl.DataFrame(
+        {"column_1": ["a", "b", "c"], "column_2": [1, 2, 3], "column_3": [10, 20, 30]}
+    )
+    assert pl.read_csv(csv.encode(), eol_char=";", has_header=False).frame_equal(
+        expected
+    )
+
+
+def test_csv_write_escape_newlines() -> None:
+    df = pl.DataFrame(dict(escape=["n\nn"]))
+    f = io.BytesIO()
+    df.write_csv(f)
+    f.seek(0)
+    read_df = pl.read_csv(f)
+    assert df.frame_equal(read_df)
+
+
+def test_skip_new_line_embedded_lines() -> None:
+    csv = r"""a,b,c,d,e\n
+        1,2,3,"\n Test",\n
+        4,5,6,"Test A",\n
+        7,8,9,"Test B \n",\n"""
+
+    df = pl.read_csv(csv.encode(), skip_rows_after_header=1, infer_schema_length=0)
+    assert df.to_dict(False) == {
+        "a": ["4", "7"],
+        "b": ["5", "8"],
+        "c": ["6", "9"],
+        "d": ["Test A", "Test B \\n"],
+        "e\\n": ["\\n", "\\n"],
+    }

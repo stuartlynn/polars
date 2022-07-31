@@ -149,9 +149,9 @@ pub type AllowedOptimizations = OptState;
 
 impl LazyFrame {
     /// Get a hold on the schema of the current LazyFrame computation.
-    pub fn schema(&self) -> SchemaRef {
+    pub fn schema(&self) -> Result<SchemaRef> {
         let logical_plan = self.clone().get_plan_builder().build();
-        logical_plan.schema().clone()
+        logical_plan.schema().map(|schema| schema.into_owned())
     }
 
     pub(crate) fn get_plan_builder(self) -> LogicalPlanBuilder {
@@ -345,12 +345,18 @@ impl LazyFrame {
             }
         }
 
-        // schema after renaming
-        let mut new_schema = (&*self.schema()).clone();
-
-        for (old, new) in existing.iter().zip(new.iter()) {
-            new_schema.rename(old, new.to_string()).unwrap();
-        }
+        let existing2 = existing.clone();
+        let new2 = new.clone();
+        let udf_schema = move |s: &Schema| {
+            // schema after renaming
+            let mut new_schema = s.clone();
+            for (old, new) in existing2.iter().zip(new2.iter()) {
+                new_schema
+                    .rename(old, new.to_string())
+                    .ok_or_else(|| PolarsError::NotFound(old.into()))?
+            }
+            Ok(Arc::new(new_schema))
+        };
 
         let prefix = "__POLARS_TEMP_";
 
@@ -393,17 +399,21 @@ impl LazyFrame {
                 DataFrame::new(cols)
             },
             None,
-            Some(new_schema),
+            Some(Arc::new(udf_schema)),
             Some("RENAME_SWAPPING"),
         )
     }
 
-    fn rename_imp(self, existing: Vec<String>, new: Vec<String>) -> Self {
-        let mut schema = (*self.schema()).clone();
-
-        for (old, new) in existing.iter().zip(&new) {
-            let _ = schema.rename(old, new.clone());
-        }
+    fn rename_impl(self, existing: Vec<String>, new: Vec<String>) -> Self {
+        let existing2 = existing.clone();
+        let new2 = new.clone();
+        let udf_schema = move |s: &Schema| {
+            let mut new_schema = s.clone();
+            for (old, new) in existing2.iter().zip(&new2) {
+                let _ = new_schema.rename(old, new.clone());
+            }
+            Ok(Arc::new(new_schema))
+        };
 
         self.with_columns(
             existing
@@ -427,7 +437,7 @@ impl LazyFrame {
                 Ok(df)
             },
             None,
-            Some(schema),
+            Some(Arc::new(udf_schema)),
             Some("RENAME"),
         )
     }
@@ -452,12 +462,13 @@ impl LazyFrame {
             .into_iter()
             .map(|a| a.as_ref().to_string())
             .collect::<Vec<_>>();
-        let schema = &*self.schema();
+        // todo! make delayed
+        let schema = &*self.schema().unwrap();
         // a column gets swapped
         if new.iter().any(|name| schema.get(name).is_some()) {
             self.rename_impl_swapping(existing, new)
         } else {
-            self.rename_imp(existing, new)
+            self.rename_impl(existing, new)
         }
     }
 
@@ -556,7 +567,7 @@ impl LazyFrame {
 
         // during debug we check if the optimizations have not modified the final schema
         #[cfg(debug_assertions)]
-        let prev_schema = logical_plan.schema().clone();
+        let prev_schema = logical_plan.schema()?.into_owned();
 
         let mut lp_top = to_alp(logical_plan, expr_arena, lp_arena)?;
 
@@ -573,18 +584,14 @@ impl LazyFrame {
         if projection_pushdown {
             let projection_pushdown_opt = ProjectionPushDown {};
             let alp = lp_arena.take(lp_top);
-            let alp = projection_pushdown_opt
-                .optimize(alp, lp_arena, expr_arena)
-                .expect("projection pushdown failed");
+            let alp = projection_pushdown_opt.optimize(alp, lp_arena, expr_arena)?;
             lp_arena.replace(lp_top, alp);
         }
 
         if predicate_pushdown {
             let predicate_pushdown_opt = PredicatePushDown::default();
             let alp = lp_arena.take(lp_top);
-            let alp = predicate_pushdown_opt
-                .optimize(alp, lp_arena, expr_arena)
-                .expect("predicate pushdown failed");
+            let alp = predicate_pushdown_opt.optimize(alp, lp_arena, expr_arena)?;
             lp_arena.replace(lp_top, alp);
         }
 
@@ -625,9 +632,7 @@ impl LazyFrame {
         if slice_pushdown {
             let slice_pushdown_opt = SlicePushDown {};
             let alp = lp_arena.take(lp_top);
-            let alp = slice_pushdown_opt
-                .optimize(alp, lp_arena, expr_arena)
-                .expect("slice pushdown failed");
+            let alp = slice_pushdown_opt.optimize(alp, lp_arena, expr_arena)?;
 
             lp_arena.replace(lp_top, alp);
 
@@ -1160,7 +1165,7 @@ impl LazyFrame {
         self,
         function: F,
         optimizations: Option<AllowedOptimizations>,
-        schema: Option<Schema>,
+        schema: Option<Arc<dyn UdfSchema>>,
         name: Option<&'static str>,
     ) -> LazyFrame
     where
@@ -1172,7 +1177,7 @@ impl LazyFrame {
             .map(
                 function,
                 optimizations.unwrap_or_default(),
-                schema.map(Arc::new),
+                schema,
                 name.unwrap_or("ANONYMOUS UDF"),
             )
             .build();
@@ -1214,10 +1219,12 @@ impl LazyFrame {
             }
         }
 
-        let new_schema = self
-            .schema()
-            .insert_index(0, name.to_string(), IDX_DTYPE)
-            .unwrap();
+        let name2 = name.to_string();
+        let udf_schema = move |s: &Schema| {
+            let new = s.insert_index(0, name2.clone(), IDX_DTYPE).unwrap();
+            Ok(Arc::new(new))
+        };
+
         let name = name.to_owned();
 
         // if we do the row count at scan we add a dummy map, to update the schema
@@ -1240,7 +1247,7 @@ impl LazyFrame {
                 }
             },
             Some(opt),
-            Some(new_schema),
+            Some(Arc::new(udf_schema)),
             Some("WITH ROW COUNT"),
         )
     }
@@ -1256,27 +1263,29 @@ impl LazyFrame {
 
     #[cfg(feature = "dtype-struct")]
     fn unnest_impl(self, cols: PlHashSet<String>) -> Self {
-        let schema = self.schema();
-
-        let mut new_schema = Schema::with_capacity(schema.len() * 2);
-        for (name, dtype) in schema.iter() {
-            if cols.contains(name) {
-                if let DataType::Struct(flds) = dtype {
-                    for fld in flds {
-                        new_schema.with_column(fld.name().clone(), fld.data_type().clone())
+        let cols2 = cols.clone();
+        let udf_schema = move |schema: &Schema| {
+            let mut new_schema = Schema::with_capacity(schema.len() * 2);
+            for (name, dtype) in schema.iter() {
+                if cols.contains(name) {
+                    if let DataType::Struct(flds) = dtype {
+                        for fld in flds {
+                            new_schema.with_column(fld.name().clone(), fld.data_type().clone())
+                        }
+                    } else {
+                        // todo: return lazy error here.
+                        panic!("expected struct dtype")
                     }
                 } else {
-                    // todo: return lazy error here.
-                    panic!("expected struct dtype")
+                    new_schema.with_column(name.clone(), dtype.clone())
                 }
-            } else {
-                new_schema.with_column(name.clone(), dtype.clone())
             }
-        }
+            Ok(Arc::new(new_schema))
+        };
         self.map(
-            move |df| df.unnest(&cols),
+            move |df| df.unnest(&cols2),
             Some(AllowedOptimizations::default()),
-            Some(new_schema),
+            Some(Arc::new(udf_schema)),
             Some("unnest"),
         )
     }

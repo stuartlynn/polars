@@ -17,10 +17,11 @@ unsafe fn unset_nulls(
     validity_values: &Bitmap,
     nulls: &mut Vec<usize>,
     empty_row_idx: &[usize],
+    base_offset: usize,
 ) {
     for i in start..last {
         if !validity_values.get_bit_unchecked(i) {
-            nulls.push(i + empty_row_idx.len());
+            nulls.push(i + empty_row_idx.len() - base_offset);
         }
     }
 }
@@ -32,14 +33,18 @@ where
     fn explode_by_offsets(&self, offsets: &[i64]) -> Series {
         debug_assert_eq!(self.chunks.len(), 1);
         let arr = self.downcast_iter().next().unwrap();
-        let values = arr.values();
 
-        let mut new_values = Vec::with_capacity(((values.len() as f32) * 1.5) as usize);
+        // make sure that we don't look beyond the sliced array
+        let values = &arr.values().as_slice()[..offsets[offsets.len() - 1] as usize];
+
         let mut empty_row_idx = vec![];
         let mut nulls = vec![];
 
         let mut start = offsets[0] as usize;
+        let base_offset = start;
         let mut last = start;
+
+        let mut new_values = Vec::with_capacity(offsets[offsets.len() - 1] as usize - start + 1);
 
         // we check all the offsets and in the case a consecutive offset is the same,
         // e.g. 0, 1, 4, 4, 6
@@ -60,15 +65,29 @@ where
                 let o = o as usize;
                 if o == last {
                     if start != last {
+                        #[cfg(debug_assertions)]
                         new_values.extend_from_slice(&values[start..last]);
+
+                        #[cfg(not(debug_assertions))]
+                        unsafe {
+                            new_values.extend_from_slice(values.get_unchecked(start..last))
+                        };
+
                         // Safety:
                         // we are in bounds
                         unsafe {
-                            unset_nulls(start, last, validity_values, &mut nulls, &empty_row_idx)
+                            unset_nulls(
+                                start,
+                                last,
+                                validity_values,
+                                &mut nulls,
+                                &empty_row_idx,
+                                base_offset,
+                            )
                         }
                     }
 
-                    empty_row_idx.push(o + empty_row_idx.len());
+                    empty_row_idx.push(o + empty_row_idx.len() - base_offset);
                     new_values.push(T::Native::default());
                     start = o;
                 }
@@ -78,16 +97,31 @@ where
             // final null check
             // Safety:
             // we are in bounds
-            unsafe { unset_nulls(start, last, validity_values, &mut nulls, &empty_row_idx) }
+            unsafe {
+                unset_nulls(
+                    start,
+                    last,
+                    validity_values,
+                    &mut nulls,
+                    &empty_row_idx,
+                    base_offset,
+                )
+            }
         } else {
             for &o in &offsets[1..] {
                 let o = o as usize;
                 if o == last {
                     if start != last {
-                        new_values.extend_from_slice(&values[start..last])
+                        #[cfg(debug_assertions)]
+                        new_values.extend_from_slice(&values[start..last]);
+
+                        #[cfg(not(debug_assertions))]
+                        unsafe {
+                            new_values.extend_from_slice(values.get_unchecked(start..last))
+                        };
                     }
 
-                    empty_row_idx.push(o + empty_row_idx.len());
+                    empty_row_idx.push(o + empty_row_idx.len() - base_offset);
                     new_values.push(T::Native::default());
                     start = o;
                 }
@@ -95,6 +129,7 @@ where
             }
         }
 
+        // add remaining values
         new_values.extend_from_slice(&values[start..]);
 
         let mut validity = MutableBitmap::with_capacity(new_values.len());
@@ -249,33 +284,40 @@ pub(crate) fn offsets_to_indexes(offsets: &[i64], capacity: usize) -> Vec<IdxSiz
     }
     let mut idx = Vec::with_capacity(capacity);
 
-    let mut count = 0;
+    // `value_count` counts the taken values from the list values
+    // and are the same unit as `offsets`
+    // we also add the start offset as a list can be sliced
+    let mut value_count = offsets[0];
+    // `empty_count` counts the duplicates taken because of empty list
+    let mut empty_count = 0usize;
     let mut last_idx = 0;
-    let mut previous_empty = false;
+
     for offset in &offsets[1..] {
-        while count < *offset {
-            count += 1;
+        // this get all the elements up till offsets
+        while value_count < *offset {
+            value_count += 1;
             idx.push(last_idx)
         }
+
+        // then we compute the previous offsets
         // Safety:
         // we started iterating from 1, so there is always a previous offset
         // we take the pointer to the previous element and deref that to get
         // the previous offset
         let previous_offset = unsafe { *(offset as *const i64).offset(-1) };
 
-        if !previous_empty && (previous_offset != *offset) {
-            last_idx += 1;
-        } else {
-            count += 1;
+        // if the previous offset is equal to the current offset we have an empty
+        // list and we duplicate previous index
+        if previous_offset == *offset {
+            empty_count += 1;
             idx.push(last_idx);
-            last_idx += 1;
         }
-        previous_empty = previous_offset == *offset;
-    }
-    // undo latest increment
-    last_idx -= 1;
 
-    for _ in 0..(capacity - count as usize) {
+        last_idx += 1;
+    }
+
+    // take the remaining values
+    for _ in 0..(capacity - (value_count - offsets[0]) as usize - empty_count) {
         idx.push(last_idx);
     }
     idx
@@ -303,16 +345,19 @@ impl ChunkExplode for ListChunked {
             ));
         }
 
-        if !offsets.is_empty() {
-            let offset = offsets[0];
-            // safety:
-            // we are in bounds
-            values = unsafe {
-                values.slice_unchecked(offset as usize, offsets[offsets.len() - 1] as usize)
-            };
-        }
-
         let mut s = if ca.can_fast_explode() {
+            // ensure that the value array is sliced
+            // as a list only slices its offsets on a slice operation
+
+            // we only do this in fast-explode as for the other
+            // branch the offsets must coincide with the values.
+            if !offsets.is_empty() {
+                let start = offsets[0] as usize;
+                let len = offsets[offsets.len() - 1] as usize - start;
+                // safety:
+                // we are in bounds
+                values = unsafe { values.slice_unchecked(start, len) };
+            }
             Series::try_from((self.name(), values)).unwrap()
         } else {
             // during tests
@@ -327,7 +372,7 @@ impl ChunkExplode for ListChunked {
                     }
                     last = o;
                 }
-                if !has_empty {
+                if !has_empty && offsets[0] == 0 {
                     panic!("could have fast exploded")
                 }
             }
@@ -341,7 +386,12 @@ impl ChunkExplode for ListChunked {
             #[cfg(feature = "dtype-categorical")]
             DataType::Categorical(rev_map) => {
                 let cats = s.u32().unwrap().clone();
-                s = CategoricalChunked::from_cats_and_rev_map(cats, rev_map.unwrap()).into_series();
+                // safety:
+                // rev_map is from same array, so we are still in bounds
+                s = unsafe {
+                    CategoricalChunked::from_cats_and_rev_map_unchecked(cats, rev_map.unwrap())
+                        .into_series()
+                };
             }
             #[cfg(feature = "dtype-date")]
             DataType::Date => s = s.into_date(),
@@ -368,47 +418,99 @@ impl ChunkExplode for Utf8Chunked {
             .downcast_iter()
             .next()
             .ok_or_else(|| PolarsError::NoData("cannot explode empty str".into()))?;
+
         let values = array.values();
         let old_offsets = array.offsets().clone();
 
-        // Because the strings are u8 stored but really are utf8 data we need to traverse the utf8 to
-        // get the chars indexes
-        // Utf8Array guarantees that this holds.
-        let str_data = unsafe { std::str::from_utf8_unchecked(values) };
+        let (new_offsets, validity) = if let Some(validity) = array.validity() {
+            // capacity estimate
+            let capacity = self.get_values_size() + validity.unset_bits();
 
-        // iterator over index and chars, we take only the index
-        let chars = str_data
-            .char_indices()
-            .map(|t| t.0 as i64)
-            .chain(std::iter::once(str_data.len() as i64));
+            let mut new_offsets = Vec::with_capacity(capacity + 1);
+            new_offsets.push(0i64);
 
-        let offsets = Buffer::from_iter(chars);
+            let mut bitmap = MutableBitmap::with_capacity(capacity);
+            let values = values.as_slice();
+            let mut old_offset = 0i64;
+            for (&offset, valid) in old_offsets[1..].iter().zip(validity) {
+                // safety:
+                // new_offsets already has a single value, so -1 is always in bounds
+                let latest_offset = unsafe { *new_offsets.get_unchecked(new_offsets.len() - 1) };
 
-        // the old bitmap doesn't fit on the exploded array, so we need to create a new one.
-        let validity = if let Some(validity) = array.validity() {
-            let capacity = offsets.len();
-            let mut bitmap = MutableBitmap::with_capacity(offsets.len() - 1);
+                if valid {
+                    debug_assert!(old_offset as usize <= values.len());
+                    debug_assert!(offset as usize <= values.len());
+                    let val = unsafe { values.get_unchecked(old_offset as usize..offset as usize) };
 
-            let mut count = 0;
-            let mut last_idx = 0;
-            let mut last_valid = validity.get_bit(last_idx);
-            for &offset in offsets.iter().skip(1) {
-                while count < offset {
-                    count += 1;
-                    bitmap.push(last_valid);
+                    // take the string value and find the char offsets
+                    // create a new offset value for each char boundary
+                    // safety:
+                    // we know we have string data.
+                    let str_val = unsafe { std::str::from_utf8_unchecked(val) };
+
+                    let char_offsets = str_val
+                        .char_indices()
+                        .skip(1)
+                        .map(|t| t.0 as i64 + latest_offset);
+
+                    // extend the chars
+                    // also keep track of the amount of offsets added
+                    // as we must update the validity bitmap
+                    let len_before = new_offsets.len();
+                    new_offsets.extend(char_offsets);
+                    new_offsets.push(latest_offset + str_val.len() as i64);
+                    bitmap.extend_constant(new_offsets.len() - len_before, true);
+                } else {
+                    // no data, just add old offset and set null bit
+                    new_offsets.push(latest_offset);
+                    bitmap.push(false)
                 }
-                last_idx += 1;
-                last_valid = validity.get_bit(last_idx);
+                old_offset = offset;
             }
-            for _ in 0..(capacity - count as usize) {
-                bitmap.push(last_valid);
-            }
-            bitmap.into()
+
+            (new_offsets.into(), bitmap.into())
         } else {
-            None
+            // fast(er) explode
+
+            // we cannot naively explode, because there might be empty strings.
+
+            // capacity estimate
+            let capacity = self.get_values_size();
+            let mut new_offsets = Vec::with_capacity(capacity + 1);
+            new_offsets.push(0i64);
+
+            let values = values.as_slice();
+            let mut old_offset = 0i64;
+            for &offset in &old_offsets[1..] {
+                // safety:
+                // new_offsets already has a single value, so -1 is always in bounds
+                let latest_offset = unsafe { *new_offsets.get_unchecked(new_offsets.len() - 1) };
+                debug_assert!(old_offset as usize <= values.len());
+                debug_assert!(offset as usize <= values.len());
+                let val = unsafe { values.get_unchecked(old_offset as usize..offset as usize) };
+
+                // take the string value and find the char offsets
+                // create a new offset value for each char boundary
+                // safety:
+                // we know we have string data.
+                let str_val = unsafe { std::str::from_utf8_unchecked(val) };
+
+                let char_offsets = str_val
+                    .char_indices()
+                    .skip(1)
+                    .map(|t| t.0 as i64 + latest_offset);
+
+                // extend the chars
+                new_offsets.extend(char_offsets);
+                new_offsets.push(latest_offset + str_val.len() as i64);
+                old_offset = offset;
+            }
+
+            (new_offsets.into(), None)
         };
+
         let array = unsafe {
-            Utf8Array::<i64>::from_data_unchecked_default(offsets, values.clone(), validity)
+            Utf8Array::<i64>::from_data_unchecked_default(new_offsets, values.clone(), validity)
         };
 
         let new_arr = Box::new(array) as ArrayRef;
@@ -558,5 +660,12 @@ mod test {
         );
 
         Ok(())
+    }
+
+    #[test]
+    fn test_row_offsets() {
+        let offsets = &[0, 1, 2, 2, 3, 4, 4];
+        let out = offsets_to_indexes(offsets, 6);
+        assert_eq!(out, &[0, 1, 2, 3, 4, 5]);
     }
 }

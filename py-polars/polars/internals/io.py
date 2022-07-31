@@ -21,7 +21,7 @@ except ImportError:
 try:
     from polars.polars import ipc_schema as _ipc_schema
     from polars.polars import parquet_schema as _parquet_schema
-except ImportError:  # pragma: no cover
+except ImportError:
     pass
 
 
@@ -55,6 +55,8 @@ def _prepare_file_arg(
     file: str | list[str] | TextIO | Path | BinaryIO | bytes, **kwargs: Any
 ) -> ContextManager[str | BinaryIO | list[str] | list[BinaryIO]]:
     """
+    Prepare file argument.
+
     Utility for read_[csv, parquet]. (not to be used by scan_[csv, parquet]).
     Returned value is always usable as a context.
 
@@ -64,8 +66,8 @@ def _prepare_file_arg(
 
     When fsspec is installed, remote file(s) is (are) opened with
     `fsspec.open(file, **kwargs)` or `fsspec.open_files(file, **kwargs)`.
-    """
 
+    """
     # Small helper to use a variable as context
     @contextmanager
     def managed_file(file: Any) -> Iterator[Any]:
@@ -81,12 +83,15 @@ def _prepare_file_arg(
     if isinstance(file, Path):
         return managed_file(format_path(file))
     if isinstance(file, str):
+        # make sure that this is before fsspec
+        # as fsspec needs requests to be installed
+        # to read from http
+        if file.startswith("http"):
+            return _process_http_file(file)
         if _WITH_FSSPEC:
             if infer_storage_options(file)["protocol"] == "file":
                 return managed_file(format_path(file))
             return fsspec.open(file, **kwargs)
-        if file.startswith("http"):
-            return _process_http_file(file)
     if isinstance(file, list) and bool(file) and all(isinstance(f, str) for f in file):
         if _WITH_FSSPEC:
             if all(infer_storage_options(f)["protocol"] == "file" for f in file):
@@ -109,6 +114,7 @@ def read_ipc_schema(file: str | BinaryIO | Path | bytes) -> dict[str, type[DataT
     Returns
     -------
     Dictionary mapping column names to datatypes
+
     """
     if isinstance(file, (str, Path)):
         file = format_path(file)
@@ -130,6 +136,7 @@ def read_parquet_schema(
     Returns
     -------
     Dictionary mapping column names to datatypes
+
     """
     if isinstance(file, (str, Path)):
         file = format_path(file)

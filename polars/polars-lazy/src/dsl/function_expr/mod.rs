@@ -1,12 +1,19 @@
 #[cfg(feature = "arg_where")]
 mod arg_where;
+mod fill_null;
 #[cfg(feature = "is_in")]
 mod is_in;
 mod pow;
+#[cfg(feature = "row_hash")]
+mod row_hash;
+#[cfg(feature = "sign")]
+mod sign;
 #[cfg(feature = "strings")]
 mod strings;
 #[cfg(any(feature = "temporal", feature = "date_offset"))]
 mod temporal;
+#[cfg(feature = "trigonometry")]
+mod trigonometry;
 
 use super::*;
 use polars_core::prelude::*;
@@ -19,7 +26,7 @@ pub enum FunctionExpr {
     NullCount,
     Pow,
     #[cfg(feature = "row_hash")]
-    Hash(usize),
+    Hash(u64, u64, u64, u64),
     #[cfg(feature = "is_in")]
     IsIn,
     #[cfg(feature = "arg_where")]
@@ -35,6 +42,31 @@ pub enum FunctionExpr {
     StringEndsWith(String),
     #[cfg(feature = "date_offset")]
     DateOffset(Duration),
+    #[cfg(feature = "trigonometry")]
+    Trigonometry(TrigonometricFunction),
+    #[cfg(feature = "sign")]
+    Sign,
+    FillNull {
+        super_type: DataType,
+    },
+}
+
+#[cfg(feature = "trigonometry")]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[derive(Clone, Copy, PartialEq, Debug, Eq, Hash)]
+pub enum TrigonometricFunction {
+    Sin,
+    Cos,
+    Tan,
+    ArcSin,
+    ArcCos,
+    ArcTan,
+    Sinh,
+    Cosh,
+    Tanh,
+    ArcSinh,
+    ArcCosh,
+    ArcTanh,
 }
 
 impl FunctionExpr {
@@ -64,7 +96,7 @@ impl FunctionExpr {
             NullCount => with_dtype(IDX_DTYPE),
             Pow => float_dtype(),
             #[cfg(feature = "row_hash")]
-            Hash(_) => with_dtype(DataType::UInt64),
+            Hash(..) => with_dtype(DataType::UInt64),
             #[cfg(feature = "is_in")]
             IsIn => with_dtype(DataType::Boolean),
             #[cfg(feature = "arg_where")]
@@ -75,6 +107,11 @@ impl FunctionExpr {
             }
             #[cfg(feature = "date_offset")]
             DateOffset(_) => same_type(),
+            #[cfg(feature = "trigonometry")]
+            Trigonometry(_) => float_dtype(),
+            #[cfg(feature = "sign")]
+            Sign => with_dtype(DataType::Int64),
+            FillNull { super_type, .. } => with_dtype(super_type.clone()),
         }
     }
 }
@@ -85,6 +122,32 @@ macro_rules! wrap {
     };
 }
 
+// Fn(&[Series], args)
+// all expression arguments are in the slice.
+// the first element is the root expression.
+macro_rules! map_as_slice {
+    ($func:path, $($args:expr),*) => {{
+        let f = move |s: &mut [Series]| {
+            $func(s, $($args),*)
+        };
+
+        SpecialEq::new(Arc::new(f))
+    }};
+}
+
+// Fn(&Series)
+macro_rules! map_without_args {
+    ($func:path) => {{
+        let f = move |s: &mut [Series]| {
+            let s = &s[0];
+            $func(s)
+        };
+
+        SpecialEq::new(Arc::new(f))
+    }};
+}
+
+// Fn(&Series, args)
 macro_rules! map_with_args {
     ($func:path, $($args:expr),*) => {{
         let f = move |s: &mut [Series]| {
@@ -96,6 +159,7 @@ macro_rules! map_with_args {
     }};
 }
 
+// FnOnce(Series, args)
 macro_rules! map_owned_with_args {
     ($func:path, $($args:expr),*) => {{
         let f = move |s: &mut [Series]| {
@@ -122,12 +186,8 @@ impl From<FunctionExpr> for SpecialEq<Arc<dyn SeriesUdf>> {
                 wrap!(pow::pow)
             }
             #[cfg(feature = "row_hash")]
-            Hash(seed) => {
-                let f = move |s: &mut [Series]| {
-                    let s = &s[0];
-                    Ok(s.hash(ahash::RandomState::with_seed(seed)).into_series())
-                };
-                wrap!(f)
+            Hash(k0, k1, k2, k3) => {
+                map_with_args!(row_hash::row_hash, k0, k1, k2, k3)
             }
             #[cfg(feature = "is_in")]
             IsIn => {
@@ -152,6 +212,17 @@ impl From<FunctionExpr> for SpecialEq<Arc<dyn SeriesUdf>> {
             #[cfg(feature = "date_offset")]
             DateOffset(offset) => {
                 map_owned_with_args!(temporal::date_offset, offset)
+            }
+            #[cfg(feature = "trigonometry")]
+            Trigonometry(trig_function) => {
+                map_with_args!(trigonometry::apply_trigonometric_function, trig_function)
+            }
+            #[cfg(feature = "sign")]
+            Sign => {
+                map_without_args!(sign::sign)
+            }
+            FillNull { super_type } => {
+                map_as_slice!(fill_null::fill_null, &super_type)
             }
         }
     }

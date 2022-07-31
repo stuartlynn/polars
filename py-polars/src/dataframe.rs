@@ -131,9 +131,11 @@ impl PyDataFrame {
         skip_rows_after_header: usize,
         row_count: Option<(String, IdxSize)>,
         sample_size: usize,
+        eol_char: &str,
     ) -> PyResult<Self> {
         let null_values = null_values.map(|w| w.0);
         let comment_char = comment_char.map(|s| s.as_bytes()[0]);
+        let eol_char = eol_char.as_bytes()[0];
 
         let row_count = row_count.map(|(name, offset)| RowCount { name, offset });
 
@@ -193,6 +195,7 @@ impl PyDataFrame {
             .with_null_values(null_values)
             .with_parse_dates(parse_dates)
             .with_quote_char(quote_char)
+            .with_end_of_line_char(eol_char)
             .with_skip_rows_after_header(skip_rows_after_header)
             .with_row_count(row_count)
             .sample_size(sample_size)
@@ -210,6 +213,7 @@ impl PyDataFrame {
         n_rows: Option<usize>,
         parallel: Wrap<ParallelStrategy>,
         row_count: Option<(String, IdxSize)>,
+        low_memory: bool,
     ) -> PyResult<Self> {
         use EitherRustPythonFile::*;
 
@@ -223,6 +227,7 @@ impl PyDataFrame {
                     .read_parallel(parallel.0)
                     .with_n_rows(n_rows)
                     .with_row_count(row_count)
+                    .set_low_memory(low_memory)
                     .finish()
             }
             Rust(f) => ParquetReader::new(f.into_inner())
@@ -519,11 +524,17 @@ impl PyDataFrame {
     }
 
     pub fn to_numpy(&self, py: Python) -> Option<PyObject> {
-        let mut st = DataType::Int8;
+        let mut st = None;
         for s in self.df.iter() {
             let dt_i = s.dtype();
-            st = get_supertype(&st, dt_i).ok()?;
+            match st {
+                None => st = Some(dt_i.clone()),
+                Some(ref mut st) => {
+                    *st = get_supertype(&st, dt_i).ok()?;
+                }
+            }
         }
+        let st = st?;
 
         match st {
             DataType::UInt32 => self
@@ -787,6 +798,7 @@ impl PyDataFrame {
             "outer" => JoinType::Outer,
             "semi" => JoinType::Semi,
             "anti" => JoinType::Anti,
+            #[cfg(feature = "asof_join")]
             "asof" => JoinType::AsOf(AsOfOptions {
                 strategy: AsofStrategy::Backward,
                 left_by: None,
@@ -794,6 +806,7 @@ impl PyDataFrame {
                 tolerance: None,
                 tolerance_str: None,
             }),
+            #[cfg(feature = "cross_join")]
             "cross" => JoinType::Cross,
             _ => panic!("not supported"),
         };

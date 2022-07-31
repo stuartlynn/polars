@@ -42,6 +42,10 @@ pub use functions::*;
 pub use options::*;
 
 use crate::dsl::function_expr::FunctionExpr;
+
+#[cfg(feature = "trigonometry")]
+use crate::dsl::function_expr::TrigonometricFunction;
+
 use polars_arrow::array::default_arrays::FromData;
 #[cfg(feature = "diff")]
 use polars_core::series::ops::NullBehavior;
@@ -302,12 +306,12 @@ impl Expr {
             |s| match s.dtype() {
                 DataType::Float32 => {
                     let ca = s.f32()?;
-                    let mask = ca.is_not_nan().fill_null(FillNullStrategy::One)?;
+                    let mask = ca.is_not_nan();
                     ca.filter(&mask).map(|ca| ca.into_series())
                 }
                 DataType::Float64 => {
                     let ca = s.f64()?;
-                    let mask = ca.is_not_nan().fill_null(FillNullStrategy::One)?;
+                    let mask = ca.is_not_nan();
                     ca.filter(&mask).map(|ca| ca.into_series())
                 }
                 _ => Ok(s),
@@ -1108,25 +1112,22 @@ impl Expr {
     }
 
     fn fill_null_impl(self, fill_value: Expr) -> Self {
-        self.map_many(
-            |s| {
-                let a = &s[0];
-                let b = &s[1];
+        let input = vec![self, fill_value];
 
-                if !a.null_count() == 0 {
-                    Ok(a.clone())
-                } else {
-                    let st = get_supertype(a.dtype(), b.dtype())?;
-                    let a = a.cast(&st)?;
-                    let b = b.cast(&st)?;
-                    let mask = a.is_not_null();
-                    a.zip_with_same_type(&mask, &b)
-                }
+        Expr::Function {
+            input,
+            // super type will be replaced by type coercion
+            function: FunctionExpr::FillNull {
+                // will be set by `type_coercion`.
+                super_type: DataType::Unknown,
             },
-            &[fill_value],
-            GetOutput::super_type(),
-        )
-        .with_fmt("fill_null")
+            options: FunctionOptions {
+                collect_groups: ApplyOptions::ApplyFlat,
+                input_wildcard_expansion: false,
+                auto_explode: false,
+                fmt_str: "fill_null",
+            },
+        }
     }
 
     /// Replace the null values by a value.
@@ -1136,9 +1137,11 @@ impl Expr {
 
     /// Replace the floating point `NaN` values by a value.
     pub fn fill_nan<E: Into<Expr>>(self, fill_value: E) -> Self {
-        when(self.clone().is_nan())
-            .then(fill_value.into())
-            .otherwise(self)
+        // we take the not branch so that self is truthy value of `when -> then -> otherwise`
+        // and that ensure we keep the name of `self`
+        when(self.clone().is_not_nan())
+            .then(self)
+            .otherwise(fill_value.into())
     }
     /// Count the values of the Series
     /// or
@@ -1194,6 +1197,201 @@ impl Expr {
                 input_wildcard_expansion: false,
                 auto_explode: false,
                 fmt_str: "pow",
+            },
+        }
+    }
+
+    /// Compute the sine of the given expression
+    #[cfg(feature = "trigonometry")]
+    pub fn sin(self) -> Self {
+        Expr::Function {
+            input: vec![self],
+            function: FunctionExpr::Trigonometry(TrigonometricFunction::Sin),
+            options: FunctionOptions {
+                collect_groups: ApplyOptions::ApplyFlat,
+                input_wildcard_expansion: false,
+                auto_explode: false,
+                fmt_str: "sin",
+            },
+        }
+    }
+
+    /// Compute the cosine of the given expression
+    #[cfg(feature = "trigonometry")]
+    pub fn cos(self) -> Self {
+        Expr::Function {
+            input: vec![self],
+            function: FunctionExpr::Trigonometry(TrigonometricFunction::Cos),
+            options: FunctionOptions {
+                collect_groups: ApplyOptions::ApplyFlat,
+                input_wildcard_expansion: false,
+                auto_explode: false,
+                fmt_str: "cos",
+            },
+        }
+    }
+
+    /// Compute the tangent of the given expression
+    #[cfg(feature = "trigonometry")]
+    pub fn tan(self) -> Self {
+        Expr::Function {
+            input: vec![self],
+            function: FunctionExpr::Trigonometry(TrigonometricFunction::Tan),
+            options: FunctionOptions {
+                collect_groups: ApplyOptions::ApplyFlat,
+                input_wildcard_expansion: false,
+                auto_explode: false,
+                fmt_str: "tan",
+            },
+        }
+    }
+
+    /// Compute the inverse sine of the given expression
+    #[cfg(feature = "trigonometry")]
+    pub fn arcsin(self) -> Self {
+        Expr::Function {
+            input: vec![self],
+            function: FunctionExpr::Trigonometry(TrigonometricFunction::ArcSin),
+            options: FunctionOptions {
+                collect_groups: ApplyOptions::ApplyFlat,
+                input_wildcard_expansion: false,
+                auto_explode: false,
+                fmt_str: "arcsin",
+            },
+        }
+    }
+
+    /// Compute the inverse cosine of the given expression
+    #[cfg(feature = "trigonometry")]
+    pub fn arccos(self) -> Self {
+        Expr::Function {
+            input: vec![self],
+            function: FunctionExpr::Trigonometry(TrigonometricFunction::ArcCos),
+            options: FunctionOptions {
+                collect_groups: ApplyOptions::ApplyFlat,
+                input_wildcard_expansion: false,
+                auto_explode: false,
+                fmt_str: "arccos",
+            },
+        }
+    }
+
+    /// Compute the inverse tangent of the given expression
+    #[cfg(feature = "trigonometry")]
+    pub fn arctan(self) -> Self {
+        Expr::Function {
+            input: vec![self],
+            function: FunctionExpr::Trigonometry(TrigonometricFunction::ArcTan),
+            options: FunctionOptions {
+                collect_groups: ApplyOptions::ApplyFlat,
+                input_wildcard_expansion: false,
+                auto_explode: false,
+                fmt_str: "arctan",
+            },
+        }
+    }
+
+    /// Compute the hyperbolic sine of the given expression
+    #[cfg(feature = "trigonometry")]
+    pub fn sinh(self) -> Self {
+        Expr::Function {
+            input: vec![self],
+            function: FunctionExpr::Trigonometry(TrigonometricFunction::Sinh),
+            options: FunctionOptions {
+                collect_groups: ApplyOptions::ApplyFlat,
+                input_wildcard_expansion: false,
+                auto_explode: false,
+                fmt_str: "sinh",
+            },
+        }
+    }
+
+    /// Compute the hyperbolic cosine of the given expression
+    #[cfg(feature = "trigonometry")]
+    pub fn cosh(self) -> Self {
+        Expr::Function {
+            input: vec![self],
+            function: FunctionExpr::Trigonometry(TrigonometricFunction::Cosh),
+            options: FunctionOptions {
+                collect_groups: ApplyOptions::ApplyFlat,
+                input_wildcard_expansion: false,
+                auto_explode: false,
+                fmt_str: "cosh",
+            },
+        }
+    }
+
+    /// Compute the hyperbolic tangent of the given expression
+    #[cfg(feature = "trigonometry")]
+    pub fn tanh(self) -> Self {
+        Expr::Function {
+            input: vec![self],
+            function: FunctionExpr::Trigonometry(TrigonometricFunction::Tanh),
+            options: FunctionOptions {
+                collect_groups: ApplyOptions::ApplyFlat,
+                input_wildcard_expansion: false,
+                auto_explode: false,
+                fmt_str: "tanh",
+            },
+        }
+    }
+
+    /// Compute the inverse hyperbolic sine of the given expression
+    #[cfg(feature = "trigonometry")]
+    pub fn arcsinh(self) -> Self {
+        Expr::Function {
+            input: vec![self],
+            function: FunctionExpr::Trigonometry(TrigonometricFunction::ArcSinh),
+            options: FunctionOptions {
+                collect_groups: ApplyOptions::ApplyFlat,
+                input_wildcard_expansion: false,
+                auto_explode: false,
+                fmt_str: "arcsinh",
+            },
+        }
+    }
+
+    /// Compute the inverse hyperbolic cosine of the given expression
+    #[cfg(feature = "trigonometry")]
+    pub fn arccosh(self) -> Self {
+        Expr::Function {
+            input: vec![self],
+            function: FunctionExpr::Trigonometry(TrigonometricFunction::ArcCosh),
+            options: FunctionOptions {
+                collect_groups: ApplyOptions::ApplyFlat,
+                input_wildcard_expansion: false,
+                auto_explode: false,
+                fmt_str: "arccosh",
+            },
+        }
+    }
+
+    /// Compute the inverse hyperbolic tangent of the given expression
+    #[cfg(feature = "trigonometry")]
+    pub fn arctanh(self) -> Self {
+        Expr::Function {
+            input: vec![self],
+            function: FunctionExpr::Trigonometry(TrigonometricFunction::ArcTanh),
+            options: FunctionOptions {
+                collect_groups: ApplyOptions::ApplyFlat,
+                input_wildcard_expansion: false,
+                auto_explode: false,
+                fmt_str: "arctanh",
+            },
+        }
+    }
+
+    /// Compute the sign of the given expression
+    #[cfg(feature = "sign")]
+    pub fn sign(self) -> Self {
+        Expr::Function {
+            input: vec![self],
+            function: FunctionExpr::Sign,
+            options: FunctionOptions {
+                collect_groups: ApplyOptions::ApplyFlat,
+                input_wildcard_expansion: false,
+                auto_explode: false,
+                fmt_str: "sign",
             },
         }
     }
@@ -1929,10 +2127,10 @@ impl Expr {
     #[cfg_attr(docsrs, doc(cfg(feature = "dtype-struct")))]
     /// Count all unique values and create a struct mapping value to count
     /// Note that it is better to turn multithreaded off in the aggregation context
-    pub fn value_counts(self, multithreaded: bool) -> Self {
+    pub fn value_counts(self, multithreaded: bool, sorted: bool) -> Self {
         self.apply(
             move |s| {
-                s.value_counts(multithreaded)
+                s.value_counts(multithreaded, sorted)
                     .map(|df| df.into_struct(s.name()).into_series())
             },
             GetOutput::map_field(|fld| {
@@ -2039,8 +2237,8 @@ impl Expr {
 
     #[cfg(feature = "row_hash")]
     /// Compute the hash of every element
-    pub fn hash(self, seed: usize) -> Expr {
-        self.map_private(FunctionExpr::Hash(seed), "hash")
+    pub fn hash(self, k0: u64, k1: u64, k2: u64, k3: u64) -> Expr {
+        self.map_private(FunctionExpr::Hash(k0, k1, k2, k3), "hash")
     }
 
     #[cfg(feature = "strings")]

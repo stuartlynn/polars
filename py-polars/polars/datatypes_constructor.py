@@ -29,14 +29,14 @@ try:
     from polars.polars import PySeries
 
     _DOCUMENTING = False
-except ImportError:  # pragma: no cover
+except ImportError:
     _DOCUMENTING = True
 
 try:
     import numpy as np
 
     _NUMPY_AVAILABLE = True
-except ImportError:  # pragma: no cover
+except ImportError:
     _NUMPY_AVAILABLE = False
 
 if not _DOCUMENTING:
@@ -67,13 +67,11 @@ if not _DOCUMENTING:
 def polars_type_to_constructor(
     dtype: PolarsDataType,
 ) -> Callable[[str, Sequence[Any], bool], PySeries]:
-    """
-    Get the right PySeries constructor for the given Polars dtype.
-    """
+    """Get the right PySeries constructor for the given Polars dtype."""
     try:
         return _POLARS_TYPE_TO_CONSTRUCTOR[dtype]
     except KeyError:  # pragma: no cover
-        raise ValueError(f"Cannot construct PySeries for type {dtype}.")
+        raise ValueError(f"Cannot construct PySeries for type {dtype}.") from None
 
 
 if _NUMPY_AVAILABLE and not _DOCUMENTING:
@@ -94,17 +92,15 @@ if _NUMPY_AVAILABLE and not _DOCUMENTING:
 
 
 def numpy_type_to_constructor(dtype: type[np.dtype]) -> Callable[..., PySeries]:
-    """
-    Get the right PySeries constructor for the given Polars dtype.
-    """
+    """Get the right PySeries constructor for the given Polars dtype."""
     try:
         return _NUMPY_TYPE_TO_CONSTRUCTOR[dtype]
     except KeyError:
         return PySeries.new_object
-    except NameError:
+    except NameError:  # pragma: no cover
         raise ImportError(
-            "'numpy' is required for this functionality."
-        )  # pragma: no cover
+            f"'numpy' is required to convert numpy dtype {dtype}."
+        ) from None
 
 
 if not _DOCUMENTING:
@@ -117,9 +113,7 @@ if not _DOCUMENTING:
 
 
 def py_type_to_constructor(dtype: type[Any]) -> Callable[..., PySeries]:
-    """
-    Get the right PySeries constructor for the given Python dtype.
-    """
+    """Get the right PySeries constructor for the given Python dtype."""
     try:
         return _PY_TYPE_TO_CONSTRUCTOR[dtype]
     except KeyError:

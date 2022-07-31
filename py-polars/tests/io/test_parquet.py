@@ -1,15 +1,14 @@
-# flake8: noqa: W191,E101
 from __future__ import annotations
 
 import io
 import os
-from typing import List
 
 import numpy as np
 import pandas as pd
 import pytest
 
 import polars as pl
+from polars.testing import assert_frame_equal_local_categoricals
 
 
 @pytest.fixture
@@ -37,14 +36,14 @@ def test_to_from_buffer(df: pl.DataFrame, compressions: list[str]) -> None:
             df.write_parquet(buf, compression=compression)
             buf.seek(0)
             read_df = pl.read_parquet(buf)
-            assert df.frame_equal(read_df, null_equal=True)
+            assert_frame_equal_local_categoricals(df, read_df)
 
     for use_pyarrow in [True, False]:
         buf = io.BytesIO()
         df.write_parquet(buf, use_pyarrow=use_pyarrow)
         buf.seek(0)
         read_df = pl.read_parquet(buf, use_pyarrow=use_pyarrow)
-        assert df.frame_equal(read_df, null_equal=True)
+        assert_frame_equal_local_categoricals(df, read_df)
 
 
 def test_to_from_file(
@@ -64,7 +63,7 @@ def test_to_from_file(
         else:
             df.write_parquet(f, compression=compression)
             read_df = pl.read_parquet(f)
-            assert df.frame_equal(read_df)
+            assert_frame_equal_local_categoricals(df, read_df)
 
 
 def test_select_columns() -> None:
@@ -91,9 +90,7 @@ def test_select_projection() -> None:
 
 
 def test_parquet_chunks() -> None:
-    """
-    This failed in https://github.com/pola-rs/polars/issues/545
-    """
+    # This failed in https://github.com/pola-rs/polars/issues/545
     cases = [
         1048576,
         1048577,
@@ -117,9 +114,7 @@ def test_parquet_chunks() -> None:
 
 
 def test_parquet_datetime() -> None:
-    """
-    This failed because parquet writers cast datetime to Date
-    """
+    # This failed because parquet writers cast datetime to Date
     f = io.BytesIO()
     data = {
         "datetime": [  # unix timestamp in ms
@@ -192,3 +187,32 @@ def test_lazy_self_join_file_cache_prop_3979(io_test_dir: str) -> None:
 
     assert a.join(b, how="cross").collect().shape == (3, 17)
     assert b.join(a, how="cross").collect().shape == (3, 17)
+
+
+def recursive_logical_type() -> None:
+    df = pl.DataFrame({"str": ["A", "B", "A", "B", "C"], "group": [1, 1, 2, 1, 2]})
+    df = df.with_column(pl.col("str").cast(pl.Categorical))
+
+    df_groups = df.groupby("group").agg([pl.col("str").list().alias("cat_list")])
+    f = io.BytesIO()
+    df_groups.write_parquet(f, use_pyarrow=True)
+    f.seek(0)
+    read = pl.read_parquet(f, use_pyarrow=True)
+    assert read.dtypes == [pl.Int64, pl.List(pl.Categorical)]
+    assert read.shape == (2, 2)
+
+
+def test_nested_dictionary() -> None:
+    with pl.StringCache():
+        df = (
+            pl.DataFrame({"str": ["A", "B", "A", "B", "C"], "group": [1, 1, 2, 1, 2]})
+            .with_column(pl.col("str").cast(pl.Categorical))
+            .groupby("group")
+            .agg([pl.col("str").list().alias("cat_list")])
+        )
+        f = io.BytesIO()
+        df.write_parquet(f)
+        f.seek(0)
+
+        read_df = pl.read_parquet(f)
+        assert df.frame_equal(read_df)

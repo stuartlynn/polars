@@ -1,7 +1,7 @@
-# flake8: noqa
 """
-The modules within `polars.internals` are interdependent. To prevent cyclical imports, they all import from each other
-via this __init__ file using `import polars.internals as pli`. The imports below are being shared across this module.
+The modules within `polars.internals` are interdependent. To prevent cyclical imports,
+they all import from each other via this __init__ file using
+`import polars.internals as pli`. The imports below are being shared across this module.
 """
 from .anonymous_scan import (
     _deser_and_exec,
@@ -22,6 +22,7 @@ from .lazy_functions import (
     col,
     concat_list,
     element,
+    format,
     lit,
     select,
 )

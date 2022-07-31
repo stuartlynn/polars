@@ -3,6 +3,7 @@ use crate::arrow_interop::to_rust::array_to_rust;
 use crate::dataframe::PyDataFrame;
 use crate::error::PyPolarsErr;
 use crate::list_construction::py_seq_to_list;
+use crate::set::set_at_idx;
 use crate::utils::reinterpret;
 use crate::{
     apply_method_all_arrow_series2, arrow_interop,
@@ -559,8 +560,11 @@ impl PySeries {
         Ok(unique.into())
     }
 
-    pub fn value_counts(&self) -> PyResult<PyDataFrame> {
-        let df = self.series.value_counts(true).map_err(PyPolarsErr::from)?;
+    pub fn value_counts(&self, sorted: bool) -> PyResult<PyDataFrame> {
+        let df = self
+            .series
+            .value_counts(true, sorted)
+            .map_err(PyPolarsErr::from)?;
         Ok(df.into())
     }
 
@@ -1117,10 +1121,9 @@ impl PySeries {
 
     pub fn str_contains(&self, pat: &str, literal: Option<bool>) -> PyResult<Self> {
         let ca = self.series.utf8().map_err(PyPolarsErr::from)?;
-        let s = if literal.unwrap_or(false) {
-            ca.contains_literal(pat)
-        } else {
-            ca.contains(pat)
+        let s = match literal {
+            Some(true) => ca.contains_literal(pat),
+            _ => ca.contains(pat),
         }
         .map_err(PyPolarsErr::from)?
         .into_series();
@@ -1145,21 +1148,25 @@ impl PySeries {
         Ok(s.into())
     }
 
-    pub fn str_replace(&self, pat: &str, val: &str) -> PyResult<Self> {
+    pub fn str_replace(&self, pat: &str, val: &str, literal: Option<bool>) -> PyResult<Self> {
         let ca = self.series.utf8().map_err(PyPolarsErr::from)?;
-        let s = ca
-            .replace(pat, val)
-            .map_err(PyPolarsErr::from)?
-            .into_series();
+        let s = match literal {
+            Some(true) => ca.replace_literal(pat, val),
+            _ => ca.replace(pat, val),
+        }
+        .map_err(PyPolarsErr::from)?
+        .into_series();
         Ok(s.into())
     }
 
-    pub fn str_replace_all(&self, pat: &str, val: &str) -> PyResult<Self> {
+    pub fn str_replace_all(&self, pat: &str, val: &str, literal: Option<bool>) -> PyResult<Self> {
         let ca = self.series.utf8().map_err(PyPolarsErr::from)?;
-        let s = ca
-            .replace_all(pat, val)
-            .map_err(PyPolarsErr::from)?
-            .into_series();
+        let s = match literal {
+            Some(true) => ca.replace_literal_all(pat, val),
+            _ => ca.replace_all(pat, val),
+        }
+        .map_err(PyPolarsErr::from)?
+        .into_series();
         Ok(s.into())
     }
 
@@ -1455,6 +1462,19 @@ impl PySeries {
         dt.set_time_zone(tz);
         Ok(dt.into_series().into())
     }
+
+    pub fn set_at_idx(&mut self, idx: PySeries, values: PySeries) -> PyResult<()> {
+        // we take the value because we want a ref count
+        // of 1 so that we can have mutable access
+        let s = std::mem::take(&mut self.series);
+        match set_at_idx(s, &idx.series, &values.series) {
+            Ok(out) => {
+                self.series = out;
+                Ok(())
+            }
+            Err(e) => Err(PyErr::from(PyPolarsErr::from(e))),
+        }
+    }
 }
 
 macro_rules! impl_ufuncs {
@@ -1567,16 +1587,6 @@ macro_rules! impl_set_at_idx {
 }
 
 impl_set_at_idx!(set_at_idx_str, &str, utf8, Utf8);
-impl_set_at_idx!(set_at_idx_f64, f64, f64, Float64);
-impl_set_at_idx!(set_at_idx_f32, f32, f32, Float32);
-impl_set_at_idx!(set_at_idx_u8, u8, u8, UInt8);
-impl_set_at_idx!(set_at_idx_u16, u16, u16, UInt16);
-impl_set_at_idx!(set_at_idx_u32, u32, u32, UInt32);
-impl_set_at_idx!(set_at_idx_u64, u64, u64, UInt64);
-impl_set_at_idx!(set_at_idx_i8, i8, i8, Int8);
-impl_set_at_idx!(set_at_idx_i16, i16, i16, Int16);
-impl_set_at_idx!(set_at_idx_i32, i32, i32, Int32);
-impl_set_at_idx!(set_at_idx_i64, i64, i64, Int64);
 impl_set_at_idx!(set_at_idx_bool, bool, bool, Boolean);
 
 macro_rules! impl_get {

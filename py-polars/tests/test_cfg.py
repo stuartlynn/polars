@@ -192,7 +192,6 @@ def test_set_tbl_rows(environ: None) -> None:
 
 
 def test_string_cache(environ: None) -> None:
-
     df1 = pl.DataFrame({"a": ["foo", "bar", "ham"], "b": [1, 2, 3]})
     df2 = pl.DataFrame({"a": ["foo", "spam", "eggs"], "c": [3, 2, 2]})
 
@@ -210,5 +209,6 @@ def test_string_cache(environ: None) -> None:
     out = df1b.join(df2b, on="a", how="inner")
     assert out.frame_equal(pl.DataFrame({"a": ["foo"], "b": [1], "c": [3]}))
 
-    # turn off again so we do not break other tests (TODO: environ fixture does not roll this back?)
+    # turn off again so we do not break other tests
+    # (TODO: environ fixture does not roll this back?)
     pl.Config.unset_global_string_cache()

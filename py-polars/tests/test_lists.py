@@ -61,7 +61,7 @@ def test_dtype() -> None:
     a = pl.Series("a", [[1, 2, 3], [2, 5], [6, 7, 8, 9]])
     assert a.dtype == pl.List
     assert a.inner_dtype == pl.Int64
-    assert getattr(a.dtype, "inner") == pl.Int64
+    assert a.dtype.inner == pl.Int64  # type: ignore[attr-defined]
 
     # explicit
     df = pl.DataFrame(
@@ -71,11 +71,11 @@ def test_dtype() -> None:
             "dt": [[date(2022, 12, 31)]],
             "dtm": [[datetime(2022, 12, 31, 1, 2, 3)]],
         },
-        columns=[  # type: ignore
-            ["i", pl.List(pl.Int8)],
-            ["tm", pl.List(pl.Time)],
-            ["dt", pl.List(pl.Date)],
-            ["dtm", pl.List(pl.Datetime)],
+        columns=[
+            ("i", pl.List(pl.Int8)),
+            ("tm", pl.List(pl.Time)),
+            ("dt", pl.List(pl.Date)),
+            ("dtm", pl.List(pl.Datetime)),
         ],
     )
     assert df.schema == {
@@ -84,7 +84,7 @@ def test_dtype() -> None:
         "dt": pl.List(pl.Date),
         "dtm": pl.List(pl.Datetime),
     }
-    assert getattr(df.schema["i"], "inner") == pl.Int8
+    assert df.schema["i"].inner == pl.Int8  # type: ignore[attr-defined]
     assert df.rows() == [
         (
             [1, 2, 3],
@@ -122,9 +122,11 @@ def test_categorical() -> None:
 
 
 def test_list_concat_rolling_window() -> None:
-    # inspired by: https://stackoverflow.com/questions/70377100/use-the-rolling-function-of-polars-to-get-a-list-of-all-values-in-the-rolling-wi
-    # this tests if it works without specifically creating list dtype upfront.
-    # note that the given answer is preferred over this snippet as that reuses the list array when shifting
+    # inspired by:
+    # https://stackoverflow.com/questions/70377100/use-the-rolling-function-of-polars-to-get-a-list-of-all-values-in-the-rolling-wi
+    # this tests if it works without specifically creating list dtype upfront. note that
+    # the given answer is preferred over this snippet as that reuses the list array when
+    # shifting
     df = pl.DataFrame(
         {
             "A": [1.0, 2.0, 9.0, 2.0, 13.0],
@@ -233,7 +235,10 @@ def test_cast_inner() -> None:
 
     # this creates an inner null type
     df = pl.from_pandas(pd.DataFrame(data=[[[]], [[]]], columns=["A"]))
-    assert df["A"].cast(pl.List(int)).dtype.inner == pl.Int64  # type: ignore
+    assert (
+        df["A"].cast(pl.List(int)).dtype.inner  # type: ignore[arg-type, attr-defined]
+        == pl.Int64
+    )
 
 
 def test_list_eval_dtype_inference() -> None:
@@ -378,3 +383,22 @@ def test_list_concat_supertype() -> None:
     assert df.with_column(pl.concat_list(pl.col(["a", "b"])).alias("concat_list"))[
         "concat_list"
     ].to_list() == [[1, 10000], [2, 20000]]
+
+
+def test_list_hash() -> None:
+    out = pl.DataFrame({"a": [[1, 2, 3], [3, 4], [1, 2, 3]]}).with_column(
+        pl.col("a").hash().alias("b")
+    )
+    assert out.dtypes == [pl.List(pl.Int64), pl.UInt64]
+    assert out[0, "b"] == out[2, "b"]
+
+
+def test_arr_contains_categorical() -> None:
+    df = pl.DataFrame(
+        {"str": ["A", "B", "A", "B", "C"], "group": [1, 1, 2, 1, 2]}
+    ).lazy()
+    df = df.with_column(pl.col("str").cast(pl.Categorical))
+    df_groups = df.groupby("group").agg([pl.col("str").list().alias("str_list")])
+    assert df_groups.filter(pl.col("str_list").arr.contains("C")).collect().to_dict(
+        False
+    ) == {"group": [2], "str_list": [["A", "C"]]}

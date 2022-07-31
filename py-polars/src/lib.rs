@@ -31,6 +31,7 @@ pub mod npy;
 pub mod prelude;
 pub(crate) mod py_modules;
 pub mod series;
+mod set;
 pub mod utils;
 
 use crate::conversion::{get_df, get_lf, get_pyseq, get_series, Wrap};
@@ -50,8 +51,8 @@ use mimalloc::MiMalloc;
 use polars::functions::{diag_concat_df, hor_concat_df};
 use polars::prelude::Null;
 use polars_core::datatypes::TimeUnit;
-use polars_core::prelude::DataFrame;
 use polars_core::prelude::IntoSeries;
+use polars_core::prelude::{DataFrame, IDX_DTYPE};
 use polars_core::POOL;
 use pyo3::panic::PanicException;
 use pyo3::types::{PyBool, PyDict, PyFloat, PyInt, PyString};
@@ -366,6 +367,7 @@ fn concat_series(series: &PyAny) -> PyResult<PySeries> {
     Ok(s.into())
 }
 
+#[cfg(feature = "ipc")]
 #[pyfunction]
 fn ipc_schema(py: Python, py_f: PyObject) -> PyResult<PyObject> {
     use polars_core::export::arrow::io::ipc::read::read_file_metadata;
@@ -384,6 +386,7 @@ fn ipc_schema(py: Python, py_f: PyObject) -> PyResult<PyObject> {
     Ok(dict.to_object(py))
 }
 
+#[cfg(feature = "parquet")]
 #[pyfunction]
 fn parquet_schema(py: Python, py_f: PyObject) -> PyResult<PyObject> {
     use polars_core::export::arrow::io::parquet::read::{infer_schema, read_metadata};
@@ -470,8 +473,13 @@ fn pool_size() -> usize {
 }
 
 #[pyfunction]
-pub fn arg_where(condition: PyExpr) -> PyExpr {
+fn arg_where(condition: PyExpr) -> PyExpr {
     polars::lazy::dsl::arg_where(condition.inner).into()
+}
+
+#[pyfunction]
+fn get_idx_type(py: Python) -> PyObject {
+    Wrap(IDX_DTYPE).to_object(py)
 }
 
 #[pymodule]
@@ -519,7 +527,9 @@ fn polars(py: Python, m: &PyModule) -> PyResult<()> {
     m.add_wrapped(wrap_pyfunction!(concat_df)).unwrap();
     m.add_wrapped(wrap_pyfunction!(concat_lf)).unwrap();
     m.add_wrapped(wrap_pyfunction!(concat_series)).unwrap();
+    #[cfg(feature = "ipc")]
     m.add_wrapped(wrap_pyfunction!(ipc_schema)).unwrap();
+    #[cfg(feature = "parquet")]
     m.add_wrapped(wrap_pyfunction!(parquet_schema)).unwrap();
     m.add_wrapped(wrap_pyfunction!(collect_all)).unwrap();
     m.add_wrapped(wrap_pyfunction!(spearman_rank_corr)).unwrap();
@@ -535,5 +545,6 @@ fn polars(py: Python, m: &PyModule) -> PyResult<()> {
     m.add_wrapped(wrap_pyfunction!(repeat)).unwrap();
     m.add_wrapped(wrap_pyfunction!(pool_size)).unwrap();
     m.add_wrapped(wrap_pyfunction!(arg_where)).unwrap();
+    m.add_wrapped(wrap_pyfunction!(get_idx_type)).unwrap();
     Ok(())
 }

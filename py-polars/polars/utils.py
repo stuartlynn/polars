@@ -1,3 +1,4 @@
+"""Utility functions."""
 from __future__ import annotations
 
 import ctypes
@@ -15,20 +16,20 @@ try:
     from polars.polars import pool_size as _pool_size
 
     _DOCUMENTING = False
-except ImportError:  # pragma: no cover
+except ImportError:
     _DOCUMENTING = True
 
 try:
     import numpy as np
 
     _NUMPY_AVAILABLE = True
-except ImportError:  # pragma: no cover
+except ImportError:
     _NUMPY_AVAILABLE = False
 
 if sys.version_info >= (3, 10):
     from typing import TypeGuard
 else:
-    from typing_extensions import TypeGuard  # pragma: no cover
+    from typing_extensions import TypeGuard
 
 
 def _process_null_values(
@@ -43,6 +44,7 @@ def _process_null_values(
 # https://stackoverflow.com/questions/4355524/getting-data-from-ctypes-array-into-numpy
 def _ptr_to_numpy(ptr: int, len: int, ptr_type: Any) -> np.ndarray:
     """
+    Create a memory block view as a numpy array.
 
     Parameters
     ----------
@@ -70,17 +72,17 @@ def _timedelta_to_pl_duration(td: timedelta) -> str:
 
 
 def in_nanoseconds_window(dt: datetime) -> bool:
+    """Check whether the given datetime can be represented as a Unix timestamp."""
     return 1386 < dt.year < 2554
 
 
 def timedelta_in_nanoseconds_window(td: timedelta) -> bool:
+    """Check whether the given timedelta can be represented as a Unix timestamp."""
     return in_nanoseconds_window(datetime(1970, 1, 1) + td)
 
 
 def _datetime_to_pl_timestamp(dt: datetime, tu: str | None) -> int:
-    """
-    Converts a python datetime to a timestamp in nanoseconds
-    """
+    """Convert a python datetime to a timestamp in nanoseconds."""
     if tu == "ns":
         return int(dt.replace(tzinfo=timezone.utc).timestamp() * 1e9)
     elif tu == "us":
@@ -91,7 +93,7 @@ def _datetime_to_pl_timestamp(dt: datetime, tu: str | None) -> int:
         # python has us precision
         return int(dt.replace(tzinfo=timezone.utc).timestamp() * 1e6)
     else:
-        raise ValueError("expected on of {'ns', 'us', 'ms'}")
+        raise ValueError("expected one of {'ns', 'us', 'ms'}")
 
 
 def _timedelta_to_pl_timedelta(td: timedelta, tu: str | None = None) -> int:
@@ -115,46 +117,55 @@ def _date_to_pl_date(d: date) -> int:
     return int(dt.timestamp()) // (3600 * 24)
 
 
+def _is_iterable_of(val: Iterable, itertype: type, eltype: type) -> bool:
+    """Check whether the given iterable is of a certain type."""
+    return isinstance(val, itertype) and all(isinstance(x, eltype) for x in val)
+
+
+def is_bool_sequence(val: Sequence[object]) -> TypeGuard[Sequence[bool]]:
+    """Check whether the given sequence is a sequence of booleans."""
+    return _is_iterable_of(val, Sequence, bool)
+
+
+def is_int_sequence(val: Sequence[object]) -> TypeGuard[Sequence[int]]:
+    """Check whether the given sequence is a sequence of integers."""
+    return _is_iterable_of(val, Sequence, int)
+
+
 def is_str_sequence(
     val: Sequence[object], allow_str: bool = False
 ) -> TypeGuard[Sequence[str]]:
     """
-    Checks that `val` is a sequence of strings. Note that a single string is a sequence of strings
-    by definition, use `allow_str=False` to return False on a single string
+    Check that `val` is a sequence of strings.
+
+    Note that a single string is a sequence of strings by definition, use
+    `allow_str=False` to return False on a single string.
     """
     if (not allow_str) and isinstance(val, str):
         return False
     return _is_iterable_of(val, Sequence, str)
 
 
-def is_int_sequence(val: Sequence[object]) -> TypeGuard[Sequence[int]]:
-    return _is_iterable_of(val, Sequence, int)
-
-
-def _is_iterable_of(val: Iterable, itertype: type, eltype: type) -> bool:
-    return isinstance(val, itertype) and all(isinstance(x, eltype) for x in val)
-
-
 def range_to_slice(rng: range) -> slice:
-    """
-    Return the given range as an equivalent slice.
-    """
+    """Return the given range as an equivalent slice."""
     return slice(rng.start, rng.stop, rng.step)
 
 
 def handle_projection_columns(
     columns: list[str] | list[int] | None,
 ) -> tuple[list[int] | None, list[str] | None]:
+    """Disambiguates between columns specified as integers vs. strings."""
     projection: list[int] | None = None
     if columns:
         if is_int_sequence(columns):
-            projection = columns  # type: ignore
+            projection = columns  # type: ignore[assignment]
             columns = None
         elif not is_str_sequence(columns):
             raise ValueError(
-                "columns arg should contain a list of all integers or all strings values."
+                "columns arg should contain a list of all integers or all strings"
+                " values."
             )
-    return projection, columns  # type: ignore
+    return projection, columns  # type: ignore[return-value]
 
 
 def _to_python_time(value: int) -> time:
@@ -185,7 +196,6 @@ def _prepare_row_count_args(
     row_count_name: str | None = None,
     row_count_offset: int = 0,
 ) -> tuple[str, int] | None:
-
     if row_count_name is not None:
         return (row_count_name, row_count_offset)
     else:
@@ -242,23 +252,20 @@ def _in_notebook() -> bool:
 
 
 def format_path(path: str | Path) -> str:
-    """
-    Returns a string path, expanding the home directory if present.
-    """
+    """Create a string path, expanding the home directory if present."""
     return os.path.expanduser(path)
 
 
 def threadpool_size() -> int:
-    """
-    Get the size of polars; thread pool
-    """
+    """Get the size of polars; thread pool."""
     return _pool_size()
 
 
 def deprecated_alias(**aliases: str) -> Callable:
-    """Decorator for deprecated function and method arguments.
+    """
+    Deprecate a function or method argument.
 
-    Use as follows:
+    Decorator for deprecated function and method arguments. Use as follows:
 
     @deprecated_alias(old_arg='new_arg')
     def myfunc(new_arg):
@@ -268,7 +275,7 @@ def deprecated_alias(**aliases: str) -> Callable:
     def deco(f: Callable) -> Callable:
         @functools.wraps(f)
         def wrapper(*args: Any, **kwargs: Any) -> Callable:
-            rename_kwargs(f.__name__, kwargs, aliases)
+            _rename_kwargs(f.__name__, kwargs, aliases)
             return f(*args, **kwargs)
 
         return wrapper
@@ -276,10 +283,14 @@ def deprecated_alias(**aliases: str) -> Callable:
     return deco
 
 
-def rename_kwargs(
+def _rename_kwargs(
     func_name: str, kwargs: dict[str, str], aliases: dict[str, str]
 ) -> None:
-    """Helper function for deprecating function and method arguments."""
+    """
+    Rename the keyword arguments of a function.
+
+    Helper function for deprecating function and method arguments.
+    """
     for alias, new in aliases.items():
         if alias in kwargs:
             if new in kwargs:

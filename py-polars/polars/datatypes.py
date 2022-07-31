@@ -9,25 +9,34 @@ try:
     import pyarrow as pa
 
     _PYARROW_AVAILABLE = True
-except ImportError:  # pragma: no cover
+except ImportError:
     _PYARROW_AVAILABLE = False
 
-from _ctypes import _SimpleCData  # type: ignore
+from _ctypes import _SimpleCData  # type: ignore[import]
 
 try:
     from polars.polars import dtype_str_repr
+    from polars.polars import get_idx_type as _get_idx_type
 
     _DOCUMENTING = False
-except ImportError:  # pragma: no cover
+except ImportError:
     _DOCUMENTING = True
 
 
-class DataType:
+def get_idx_type() -> Type[DataType]:
     """
-    Base class for all Polars data types.
-    """
+    Get the datatype used for polars Indexing
 
-    def __new__(cls, *args, **kwargs) -> PolarsDataType:  # type: ignore
+    This is UInt32 in regulars polars and UInt64 in polars_u64_idx
+
+    """
+    return _get_idx_type()
+
+
+class DataType:
+    """Base class for all Polars data types."""
+
+    def __new__(cls, *args: Any, **kwargs: Any) -> PolarsDataType:  # type: ignore[misc]
         # this formulation allows for equivalent use of "pl.Type" and "pl.Type()", while
         # still respecting types that take initialisation params (eg: Duration/Datetime)
         if args or kwargs:
@@ -52,70 +61,71 @@ ColumnsType = Union[
 
 
 class Int8(DataType):
-    """8-bit signed integer type"""
+    """8-bit signed integer type."""
 
 
 class Int16(DataType):
-    """16-bit signed integer type"""
+    """16-bit signed integer type."""
 
 
 class Int32(DataType):
-    """32-bit signed integer type"""
+    """32-bit signed integer type."""
 
 
 class Int64(DataType):
-    """64-bit signed integer type"""
+    """64-bit signed integer type."""
 
 
 class UInt8(DataType):
-    """8-bit unsigned integer type"""
+    """8-bit unsigned integer type."""
 
 
 class UInt16(DataType):
-    """16-bit unsigned integer type"""
+    """16-bit unsigned integer type."""
 
 
 class UInt32(DataType):
-    """32-bit unsigned integer type"""
+    """32-bit unsigned integer type."""
 
 
 class UInt64(DataType):
-    """64-bit unsigned integer type"""
+    """64-bit unsigned integer type."""
 
 
 class Float32(DataType):
-    """32-bit floating point type"""
+    """32-bit floating point type."""
 
 
 class Float64(DataType):
-    """64-bit floating point type"""
+    """64-bit floating point type."""
 
 
 class Boolean(DataType):
-    """Boolean type"""
+    """Boolean type."""
 
 
 class Utf8(DataType):
-    """UTF-8 encoded string type"""
+    """UTF-8 encoded string type."""
 
 
 class Null(DataType):
-    """Type representing Null / None values"""
+    """Type representing Null / None values."""
 
 
 class List(DataType):
     def __init__(self, inner: type[DataType]):
         """
-        Nested list/array type
+        Nested list/array type.
 
         Parameters
         ----------
         inner
             The `DataType` of values within the list
+
         """
         self.inner = py_type_to_dtype(inner)
 
-    def __eq__(self, other: type[DataType]) -> bool:  # type: ignore
+    def __eq__(self, other: type[DataType]) -> bool:  # type: ignore[override]
         # The comparison allows comparing objects to classes
         # and specific inner types to none specific.
         # if one of the arguments is not specific about its inner type
@@ -141,15 +151,15 @@ class List(DataType):
 
 
 class Date(DataType):
-    """Calendar date type"""
+    """Calendar date type."""
 
 
 class Datetime(DataType):
-    """Calendar date and time type"""
+    """Calendar date and time type."""
 
     def __init__(self, time_unit: str = "us", time_zone: str | None = None):
         """
-        Calendar date and time type
+        Calendar date and time type.
 
         Parameters
         ----------
@@ -157,11 +167,12 @@ class Datetime(DataType):
             Any of {'ns', 'us', 'ms'}
         time_zone
             Timezone string as defined in pytz
+
         """
         self.tu = time_unit
         self.tz = time_zone
 
-    def __eq__(self, other: type[DataType]) -> bool:  # type: ignore
+    def __eq__(self, other: type[DataType]) -> bool:  # type: ignore[override]
         # allow comparing object instances to class
         if type(other) is type and issubclass(other, Datetime):
             return True
@@ -175,20 +186,21 @@ class Datetime(DataType):
 
 
 class Duration(DataType):
-    """Time duration/delta type"""
+    """Time duration/delta type."""
 
     def __init__(self, time_unit: str = "us"):
         """
-        Time duration/delta type
+        Time duration/delta type.
 
         Parameters
         ----------
         time_unit
             Any of {'ns', 'us', 'ms'}
+
         """
         self.tu = time_unit
 
-    def __eq__(self, other: type[DataType]) -> bool:  # type: ignore
+    def __eq__(self, other: type[DataType]) -> bool:  # type: ignore[override]
         # allow comparing object instances to class
         if type(other) is type and issubclass(other, Duration):
             return True
@@ -202,21 +214,21 @@ class Duration(DataType):
 
 
 class Time(DataType):
-    """Time of day type"""
+    """Time of day type."""
 
 
 class Object(DataType):
-    """Type for wrapping arbitrary Python objects"""
+    """Type for wrapping arbitrary Python objects."""
 
 
 class Categorical(DataType):
-    """A categorical encoding of a set of strings"""
+    """A categorical encoding of a set of strings."""
 
 
 class Field:
     def __init__(self, name: str, dtype: type[DataType]):
         """
-        Definition of a single field within a `Struct` DataType
+        Definition of a single field within a `Struct` DataType.
 
         Parameters
         ----------
@@ -224,11 +236,12 @@ class Field:
             The name of the field within its parent `Struct`
         dtype
             The `DataType` of the field's values
+
         """
         self.name = name
         self.dtype = py_type_to_dtype(dtype)
 
-    def __eq__(self, other: Field) -> bool:  # type: ignore
+    def __eq__(self, other: Field) -> bool:  # type: ignore[override]
         return (self.name == other.name) & (self.dtype == other.dtype)
 
     def __repr__(self) -> str:
@@ -242,16 +255,17 @@ class Field:
 class Struct(DataType):
     def __init__(self, fields: Sequence[Field]):
         """
-        Struct composite type
+        Struct composite type.
 
         Parameters
         ----------
         fields
             The sequence of fields that make up the struct
+
         """
         self.fields = fields
 
-    def __eq__(self, other: type[DataType]) -> bool:  # type: ignore
+    def __eq__(self, other: type[DataType]) -> bool:  # type: ignore[override]
         # The comparison allows comparing objects to classes
         # and specific inner types to none specific.
         # if one of the arguments is not specific about its inner type
@@ -421,21 +435,27 @@ def dtype_to_ctype(dtype: PolarsDataType) -> type[_SimpleCData]:
     try:
         return _DTYPE_TO_CTYPE[dtype]
     except KeyError:  # pragma: no cover
-        raise NotImplementedError
+        raise NotImplementedError(
+            f"Conversion of polars data type {dtype} to C-type not implemented."
+        ) from None
 
 
 def dtype_to_ffiname(dtype: PolarsDataType) -> str:
     try:
         return _DTYPE_TO_FFINAME[dtype]
     except KeyError:  # pragma: no cover
-        raise NotImplementedError
+        raise NotImplementedError(
+            f"Conversion of polars data type {dtype} to FFI not implemented."
+        ) from None
 
 
 def dtype_to_py_type(dtype: PolarsDataType) -> type:
     try:
         return _DTYPE_TO_PY_TYPE[dtype]
     except KeyError:  # pragma: no cover
-        raise NotImplementedError
+        raise NotImplementedError(
+            f"Conversion of polars data type {dtype} to Python type not implemented."
+        ) from None
 
 
 def is_polars_dtype(data_type: Any) -> bool:
@@ -453,27 +473,30 @@ def py_type_to_dtype(data_type: Any) -> type[DataType]:
     try:
         return _PY_TYPE_TO_DTYPE[data_type]
     except KeyError:  # pragma: no cover
-        raise NotImplementedError
+        raise NotImplementedError(
+            f"Conversion of Python data type {data_type} to Polars data type not"
+            " implemented."
+        ) from None
 
 
 def py_type_to_arrow_type(dtype: type[Any]) -> pa.lib.DataType:
-    """
-    Convert a Python dtype to an Arrow dtype.
-    """
+    """Convert a Python dtype to an Arrow dtype."""
     try:
         return _PY_TYPE_TO_ARROW_TYPE[dtype]
     except KeyError:  # pragma: no cover
-        raise ValueError(f"Cannot parse dtype {dtype} into Arrow dtype.")
+        raise ValueError(
+            f"Cannot parse Python data type {dtype} into Arrow data type."
+        ) from None
 
 
 def dtype_to_arrow_type(dtype: PolarsDataType) -> pa.lib.DataType:
-    """
-    Convert a Polars dtype to an Arrow dtype.
-    """
+    """Convert a Polars dtype to an Arrow dtype."""
     try:
         return _DTYPE_TO_ARROW_TYPE[dtype]
     except KeyError:  # pragma: no cover
-        raise ValueError(f"Cannot parse dtype {dtype} into Arrow dtype.")
+        raise ValueError(
+            f"Cannot parse data type {dtype} into Arrow data type."
+        ) from None
 
 
 def supported_numpy_char_code(dtype: str) -> bool:
@@ -484,7 +507,9 @@ def numpy_char_code_to_dtype(dtype: str) -> type[DataType]:
     try:
         return _NUMPY_CHAR_CODE_TO_DTYPE[dtype]
     except KeyError:  # pragma: no cover
-        raise NotImplementedError
+        raise NotImplementedError(
+            f"Cannot parse numpy data type {dtype} into Polars data type."
+        ) from None
 
 
 def maybe_cast(

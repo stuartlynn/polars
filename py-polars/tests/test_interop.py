@@ -42,7 +42,8 @@ def test_df_from_numpy() -> None:
         pl.datatypes.UInt16,
         pl.datatypes.UInt32,
         pl.datatypes.UInt64,
-        pl.datatypes.Float32,  # np.float16 gets converted to float32 as Rust does not support float16.
+        # np.float16 gets converted to float32 as Rust does not support float16.
+        pl.datatypes.Float32,
         pl.datatypes.Float32,
         pl.datatypes.Float64,
         pl.datatypes.Utf8,
@@ -82,7 +83,12 @@ def test_to_numpy() -> None:
     test_series_to_numpy("float64", [21.7, 21.8, 21], pl.Float64, np.float64)
 
     test_series_to_numpy("str", ["string1", "string2", "string3"], pl.Utf8, np.object_)
-    # test_series_to_numpy("bytes", ["byte_string1", "byte_string2", "byte_string3"], pl.Object, np.bytes_)
+    # test_series_to_numpy(
+    #     "bytes",
+    #     ["byte_string1", "byte_string2", "byte_string3"],
+    #     pl.Object,
+    #     np.bytes_,
+    # )
 
 
 def test_from_pandas() -> None:
@@ -125,7 +131,7 @@ def test_from_pandas_nan_to_none() -> None:
     with pytest.raises(ArrowInvalid, match="Could not convert"):
         pl.from_pandas(df, nan_to_none=False)
 
-    df = pd.Series([2, np.nan, None], name="pd")  # type: ignore
+    df = pd.Series([2, np.nan, None], name="pd")  # type: ignore[assignment]
     out_true = pl.from_pandas(df)
     out_false = pl.from_pandas(df, nan_to_none=False)
     df.loc[2] = pd.NA
@@ -270,7 +276,7 @@ def test_from_pandas_dataframe() -> None:
 
     # if not a pandas dataframe, raise a ValueError
     with pytest.raises(ValueError):
-        _ = pl.from_pandas([1, 2])  # type: ignore
+        _ = pl.from_pandas([1, 2])  # type: ignore[call-overload]
 
 
 def test_from_pandas_series() -> None:
@@ -357,19 +363,19 @@ def test_from_empty_pandas_strings() -> None:
 
 def test_from_empty_arrow() -> None:
     df = pl.from_arrow(pa.table(pd.DataFrame({"a": [], "b": []})))
-    assert df.columns == ["a", "b"]  # type: ignore
-    assert df.dtypes == [pl.Float64, pl.Float64]  # type: ignore
+    assert df.columns == ["a", "b"]  # type: ignore[union-attr]
+    assert df.dtypes == [pl.Float64, pl.Float64]  # type: ignore[union-attr]
 
     # 2705
     df1 = pd.DataFrame(columns=["b"], dtype=float)
     tbl = pa.Table.from_pandas(df1)
     out = pl.from_arrow(tbl)
-    assert out.columns == ["b", "__index_level_0__"]  # type: ignore
-    assert out.dtypes == [pl.Float64, pl.Utf8]  # type: ignore
+    assert out.columns == ["b", "__index_level_0__"]  # type: ignore[union-attr]
+    assert out.dtypes == [pl.Float64, pl.Utf8]  # type: ignore[union-attr]
     tbl = pa.Table.from_pandas(df1, preserve_index=False)
     out = pl.from_arrow(tbl)
-    assert out.columns == ["b"]  # type: ignore
-    assert out.dtypes == [pl.Float64]  # type: ignore
+    assert out.columns == ["b"]  # type: ignore[union-attr]
+    assert out.dtypes == [pl.Float64]  # type: ignore[union-attr]
 
 
 def test_from_null_column() -> None:
@@ -408,8 +414,8 @@ def test_cat_int_types_3500() -> None:
         categorical_df = pd.Series(["a", "a", "b"], dtype="category")
         pyarrow_array = pa.Array.from_pandas(categorical_df)
 
-        # The in-memory representation of each category can either be a signed or unsigned 8-bit integer
-        # Pandas uses Int8...
+        # The in-memory representation of each category can either be a signed or
+        # unsigned 8-bit integer. Pandas uses Int8...
         int_dict_type = pa.dictionary(index_type=pa.int8(), value_type=pa.utf8())
         # ... while DuckDB uses UInt8
         uint_dict_type = pa.dictionary(index_type=pa.uint8(), value_type=pa.utf8())
@@ -423,3 +429,9 @@ def test_from_pyarrow_chunked_array() -> None:
     column = pa.chunked_array([[1], [2]])
     series = pl.Series("column", column)
     assert series.to_list() == [1, 2]
+
+
+def test_numpy_preserve_uint64_4112() -> None:
+    assert pl.DataFrame({"a": [1, 2, 3]}).with_column(
+        pl.col("a").hash()
+    ).to_numpy().dtype == np.dtype("uint64")

@@ -180,13 +180,13 @@ impl DataFrame {
     }
 }
 
-type Tracker = PlHashMap<String, PlHashSet<DataType>>;
+type Tracker = PlIndexMap<String, PlHashSet<DataType>>;
 
 pub fn infer_schema(
     iter: impl Iterator<Item = Vec<(String, impl Into<DataType>)>>,
     infer_schema_length: usize,
 ) -> Schema {
-    let mut values: Tracker = Tracker::new();
+    let mut values: Tracker = Tracker::default();
     let len = iter.size_hint().1.unwrap_or(infer_schema_length);
 
     let max_infer = std::cmp::min(len, infer_schema_length);
@@ -278,44 +278,6 @@ impl<'a> From<&AnyValue<'a>> for Field {
         Field::new("", val.into())
     }
 }
-impl<'a> From<&AnyValue<'a>> for DataType {
-    fn from(val: &AnyValue<'a>) -> Self {
-        use AnyValue::*;
-        match val {
-            Null => DataType::Null,
-            Boolean(_) => DataType::Boolean,
-            Utf8(_) => DataType::Utf8,
-            Utf8Owned(_) => DataType::Utf8,
-            UInt32(_) => DataType::UInt32,
-            UInt64(_) => DataType::UInt64,
-            Int32(_) => DataType::Int32,
-            Int64(_) => DataType::Int64,
-            Float32(_) => DataType::Float32,
-            Float64(_) => DataType::Float64,
-            #[cfg(feature = "dtype-date")]
-            Date(_) => DataType::Date,
-            #[cfg(feature = "dtype-datetime")]
-            Datetime(_, tu, tz) => DataType::Datetime(*tu, (*tz).clone()),
-            #[cfg(feature = "dtype-time")]
-            Time(_) => DataType::Time,
-            List(s) => DataType::List(Box::new(s.dtype().clone())),
-            #[cfg(feature = "dtype-struct")]
-            StructOwned(payload) => DataType::Struct(payload.1.to_vec()),
-            #[cfg(feature = "dtype-struct")]
-            Struct(_, fields) => DataType::Struct(fields.to_vec()),
-            #[cfg(feature = "dtype-duration")]
-            Duration(_, tu) => DataType::Duration(*tu),
-            UInt8(_) => DataType::UInt8,
-            UInt16(_) => DataType::UInt16,
-            Int8(_) => DataType::Int8,
-            Int16(_) => DataType::Int16,
-            #[cfg(feature = "dtype-categorical")]
-            Categorical(_, rev_map) => DataType::Categorical(Some(Arc::new((*rev_map).clone()))),
-            #[cfg(feature = "object")]
-            Object(o) => DataType::Object(o.type_name()),
-        }
-    }
-}
 
 impl From<&Row<'_>> for Schema {
     fn from(row: &Row) -> Self {
@@ -349,7 +311,7 @@ pub(crate) enum AnyValueBuffer<'a> {
     Utf8(Utf8ChunkedBuilder),
     #[cfg(feature = "dtype-categorical")]
     Categorical(CategoricalChunkedBuilder),
-    All(Vec<AnyValue<'a>>),
+    All(DataType, Vec<AnyValue<'a>>),
 }
 
 impl<'a> AnyValueBuffer<'a> {
@@ -385,7 +347,7 @@ impl<'a> AnyValueBuffer<'a> {
             (Utf8(builder), AnyValue::Utf8(v)) => builder.append_value(v),
             (Utf8(builder), AnyValue::Null) => builder.append_null(),
             // Struct and List can be recursive so use anyvalues for that
-            (All(vals), v) => vals.push(v),
+            (All(_, vals), v) => vals.push(v),
             _ => return None,
         };
         Some(())
@@ -417,7 +379,7 @@ impl<'a> AnyValueBuffer<'a> {
             Utf8(b) => b.finish().into_series(),
             #[cfg(feature = "dtype-categorical")]
             Categorical(b) => b.finish().into_series(),
-            All(vals) => Series::new("", vals),
+            All(dtype, vals) => Series::from_any_values_and_dtype("", &vals, &dtype).unwrap(),
         }
     }
 }
@@ -447,7 +409,7 @@ impl From<(&DataType, usize)> for AnyValueBuffer<'_> {
             #[cfg(feature = "dtype-categorical")]
             Categorical(_) => AnyValueBuffer::Categorical(CategoricalChunkedBuilder::new("", len)),
             // Struct and List can be recursive so use anyvalues for that
-            _ => AnyValueBuffer::All(Vec::with_capacity(len)),
+            dt => AnyValueBuffer::All(dt.clone(), Vec::with_capacity(len)),
         }
     }
 }

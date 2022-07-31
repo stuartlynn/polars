@@ -29,6 +29,7 @@ from polars.datatypes import (
     Utf8,
     dtype_to_ctype,
     dtype_to_ffiname,
+    get_idx_type,
     maybe_cast,
     numpy_char_code_to_dtype,
     py_type_to_dtype,
@@ -41,12 +42,15 @@ from polars.internals.construction import (
     sequence_to_pyseries,
     series_to_pyseries,
 )
-from polars.internals.functions import PolarsSlice
+from polars.internals.slice import PolarsSlice
 from polars.utils import (
     _date_to_pl_date,
     _datetime_to_pl_timestamp,
     _ptr_to_numpy,
     _to_python_datetime,
+    deprecated_alias,
+    is_bool_sequence,
+    is_int_sequence,
     range_to_slice,
 )
 
@@ -54,34 +58,34 @@ try:
     from polars.polars import PyDataFrame, PySeries
 
     _DOCUMENTING = False
-except ImportError:  # pragma: no cover
+except ImportError:
     _DOCUMENTING = True
 
 try:
     import numpy as np
 
     _NUMPY_AVAILABLE = True
-except ImportError:  # pragma: no cover
+except ImportError:
     _NUMPY_AVAILABLE = False
 
 try:
     import pyarrow as pa
 
     _PYARROW_AVAILABLE = True
-except ImportError:  # pragma: no cover
+except ImportError:
     _PYARROW_AVAILABLE = False
 
 try:
     import pandas as pd
 
     _PANDAS_AVAILABLE = True
-except ImportError:  # pragma: no cover
+except ImportError:
     _PANDAS_AVAILABLE = False
 
 if sys.version_info >= (3, 8):
     from typing import Literal
 else:
-    from typing_extensions import Literal  # pragma: no cover
+    from typing_extensions import Literal
 
 
 def get_ffi_func(
@@ -106,6 +110,7 @@ def get_ffi_func(
     Returns
     -------
     ffi function, or None if not found
+
     """
     ffi_name = dtype_to_ffiname(dtype)
     fname = name.replace("<>", ffi_name)
@@ -144,7 +149,8 @@ class Series:
     strict
         Throw error on numeric overflow
     nan_to_null
-        In case a numpy arrow is used to create this Series, indicate how to deal with np.nan
+        In case a numpy arrow is used to create this Series, indicate how to deal with
+        np.nan
 
     Examples
     --------
@@ -245,9 +251,7 @@ class Series:
 
     @classmethod
     def _from_arrow(cls, name: str, values: pa.Array, rechunk: bool = True) -> Series:
-        """
-        Construct a Series from an Arrow Array.
-        """
+        """Construct a Series from an Arrow Array."""
         return cls._from_pyseries(arrow_to_pyseries(name, values, rechunk))
 
     @classmethod
@@ -257,9 +261,7 @@ class Series:
         values: pd.Series | pd.DatetimeIndex,
         nan_to_none: bool = True,
     ) -> Series:
-        """
-        Construct a Series from a pandas Series or DatetimeIndex.
-        """
+        """Construct a Series from a pandas Series or DatetimeIndex."""
         return cls._from_pyseries(
             pandas_to_pyseries(name, values, nan_to_none=nan_to_none)
         )
@@ -304,7 +306,9 @@ class Series:
     def __rxor__(self, other: Series) -> Series:
         return self.__xor__(other)
 
-    def _comp(self, other: Any, op: str) -> Series:
+    def _comp(
+        self, other: Any, op: Literal["eq", "neq", "gt", "lt", "gt_eq", "lt_eq"]
+    ) -> Series:
         if isinstance(other, datetime) and self.dtype == Datetime:
             ts = _datetime_to_pl_timestamp(other, self.time_unit)
             f = get_ffi_func(op + "_<>", Int64, self._s)
@@ -358,7 +362,8 @@ class Series:
             f = get_ffi_func(op_ffi, self.dtype, self._s)
         if f is None:
             raise ValueError(
-                f"cannot do arithmetic with series of dtype: {self.dtype} and argument of type: {type(other)}"
+                f"cannot do arithmetic with series of dtype: {self.dtype} and argument"
+                f" of type: {type(other)}"
             )
         return wrap_s(f(other))
 
@@ -457,7 +462,79 @@ class Series:
     def __neg__(self) -> Series:
         return 0 - self
 
-    def __getitem__(self, item: int | Series | range | slice) -> Any:
+    def _pos_idxs(self, idxs: np.ndarray | Series) -> Series:
+        # pl.UInt32 (polars) or pl.UInt64 (polars_u64_idx).
+        idx_type = get_idx_type()
+
+        if isinstance(idxs, Series):
+            if idxs.dtype == idx_type:
+                return idxs
+            if idxs.dtype in {
+                UInt8,
+                UInt16,
+                UInt64 if idx_type == UInt32 else UInt32,
+                Int8,
+                Int16,
+                Int32,
+                Int64,
+            }:
+                if idx_type == UInt32:
+                    if idxs.dtype in {Int64, UInt64}:
+                        if idxs.max() >= 2**32:  # type: ignore[operator]
+                            raise ValueError(
+                                "Index positions should be smaller than 2^32."
+                            )
+                    if idxs.dtype == Int64:
+                        if idxs.min() < -(2**32):  # type: ignore[operator]
+                            raise ValueError(
+                                "Index positions should be bigger than -2^32 + 1."
+                            )
+                if idxs.dtype in {Int8, Int16, Int32, Int64}:
+                    if idxs.min() < 0:  # type: ignore[operator]
+                        if idx_type == UInt32:
+                            if idxs.dtype in {Int8, Int16}:
+                                idxs = idxs.cast(Int32)
+                        else:
+                            if idxs.dtype in {Int8, Int16, Int32}:
+                                idxs = idxs.cast(Int64)
+
+                        idxs = pli.select(
+                            pli.when(pli.lit(idxs) < 0)
+                            .then(self.len() + pli.lit(idxs))
+                            .otherwise(pli.lit(idxs))
+                        ).to_series()
+
+                return idxs.cast(idx_type)
+
+        if _NUMPY_AVAILABLE and isinstance(idxs, np.ndarray):
+            if idxs.ndim != 1:
+                raise ValueError("Only 1D numpy array is supported as index.")
+            if idxs.dtype.kind in ("i", "u"):
+                # Numpy array with signed or unsigned integers.
+
+                if idx_type == UInt32:
+                    if idxs.dtype in {np.int64, np.uint64} and idxs.max() >= 2**32:
+                        raise ValueError("Index positions should be smaller than 2^32.")
+                    if idxs.dtype == np.int64 and idxs.min() < -(2**32):
+                        raise ValueError(
+                            "Index positions should be bigger than -2^32 + 1."
+                        )
+                if idxs.dtype.kind == "i" and idxs.min() < 0:
+                    if idx_type == UInt32:
+                        if idxs.dtype in (np.int8, np.int16):
+                            idxs = idxs.astype(np.int32)
+                    else:
+                        if idxs.dtype in (np.int8, np.int16, np.int32):
+                            idxs = idxs.astype(np.int64)
+
+                    # Update negative indexes to absolute indexes.
+                    idxs = np.where(idxs < 0, self.len() + idxs, idxs)
+
+                return Series("", idxs, dtype=idx_type)
+
+        raise NotImplementedError("Unsupported idxs datatype.")
+
+    def __getitem__(self, item: int | Series | range | slice | np.ndarray) -> Any:
         if isinstance(item, int):
             if item < 0:
                 item = self.len() + item
@@ -473,9 +550,29 @@ class Series:
                 return out
 
             return self._s.get_idx(item)
-        # assume it is boolean mask
+
+        if _NUMPY_AVAILABLE and isinstance(item, np.ndarray):
+            if item.ndim != 1:
+                raise ValueError("Only a 1D-Numpy array is supported as index.")
+            if item.dtype.kind in ("i", "u"):
+                # Numpy array with signed or unsigned integers.
+                return wrap_s(self._s.take_with_series(self._pos_idxs(item).inner()))
+            if item.dtype == bool:
+                return wrap_s(self._s.filter(pli.Series("", item).inner()))
+
+        if isinstance(item, Sequence):
+            if is_bool_sequence(item):
+                item = Series("", item)  # fall through to next if isinstance
+            elif is_int_sequence(item):
+                item = Series("", item)  # fall through to next if isinstance
+
         if isinstance(item, Series):
-            return wrap_s(self._s.filter(item._s))
+            if item.dtype == Boolean:
+                return wrap_s(self._s.filter(item._s))
+            if item.dtype == UInt32:
+                return wrap_s(self._s.take_with_series(item.inner()))
+            if item.dtype in {UInt8, UInt16, UInt64, Int8, Int16, Int32, Int64}:
+                return wrap_s(self._s.take_with_series(self._pos_idxs(item).inner()))
 
         if isinstance(item, range):
             return self[range_to_slice(item)]
@@ -489,8 +586,14 @@ class Series:
     def __setitem__(
         self, key: int | Series | np.ndarray | list | tuple, value: Any
     ) -> None:
-        if isinstance(value, Sequence):
-            raise ValueError("cannot set with list/tuple as value; use a scalar value")
+        if isinstance(value, Sequence) and not isinstance(value, str):
+            if self.is_numeric() or self.is_datelike():
+                self.set_at_idx(key, value)  # type: ignore[arg-type]
+                return None
+            raise ValueError(
+                f"cannot set Series of dtype: {self.dtype} with list/tuple as value;"
+                " use a scalar value"
+            )
         if isinstance(key, Series):
             if key.dtype == Boolean:
                 self._s = self.set(key, value)._s
@@ -515,17 +618,20 @@ class Series:
 
     def estimated_size(self) -> int:
         """
-        Returns an estimation of the total (heap) allocated size of the `Series` in bytes.
+        Return an estimation of the total (heap) allocated size of the `Series` in
+        bytes.
 
-        This estimation is the sum of the size of its buffers, validity, including nested arrays.
-        Multiple arrays may share buffers and bitmaps. Therefore, the size of 2 arrays is not the
-        sum of the sizes computed from this function. In particular, [`StructArray`]'s size is an upper bound.
+        This estimation is the sum of the size of its buffers, validity, including
+        nested arrays. Multiple arrays may share buffers and bitmaps. Therefore, the
+        size of 2 arrays is not the sum of the sizes computed from this function. In
+        particular, [`StructArray`]'s size is an upper bound.
 
-        When an array is sliced, its allocated size remains constant because the buffer unchanged.
-        However, this function will yield a smaller number. This is because this function returns
-        the visible size of the buffer, not its total capacity.
+        When an array is sliced, its allocated size remains constant because the buffer
+        unchanged. However, this function will yield a smaller number. This is because
+        this function returns the visible size of the buffer, not its total capacity.
 
         FFI buffers are included in this estimation.
+
         """
         return self._s.estimated_size()
 
@@ -553,6 +659,7 @@ class Series:
         Returns
         -------
         Boolean literal
+
         """
         return self.to_frame().select(pli.col(self.name).any()).to_series()[0]
 
@@ -563,35 +670,28 @@ class Series:
         Returns
         -------
         Boolean literal
+
         """
         return self.to_frame().select(pli.col(self.name).all()).to_series()[0]
 
     def log(self, base: float = math.e) -> Series:
-        """
-        Compute the logarithm to a given base
-        """
+        """Compute the logarithm to a given base."""
         return self.to_frame().select(pli.col(self.name).log(base)).to_series()
 
     def log10(self) -> Series:
-        """
-        Return the base 10 logarithm of the input array, element-wise.
-        """
+        """Compute the base 10 logarithm of the input array, element-wise."""
         return self.log(10.0)
 
     def exp(self) -> Series:
-        """
-        Return the exponential element-wise
-        """
+        """Compute the exponential, element-wise."""
         return self.to_frame().select(pli.col(self.name).exp()).to_series()
 
     def drop_nulls(self) -> Series:
-        """
-        Create a new Series that copies data from this Series without null values.
-        """
+        """Create a new Series that copies data from this Series without null values."""
         return wrap_s(self._s.drop_nulls())
 
     def drop_nans(self) -> Series:
-        """ """
+        """Drop NaN values."""
         return self.filter(self.is_not_nan())
 
     def to_frame(self) -> pli.DataFrame:
@@ -644,12 +744,14 @@ class Series:
         Returns
         -------
         DataType
+
         """
         return self._s.inner_dtype()
 
     def describe(self) -> pli.DataFrame:
         """
-        Quick summary statistics of a series. Series with mixed datatypes will return summary statistics for the datatype of the first value.
+        Quick summary statistics of a series. Series with mixed datatypes will return
+        summary statistics for the datatype of the first value.
 
         Returns
         -------
@@ -768,9 +870,7 @@ class Series:
         return self._s.mean()
 
     def product(self) -> int | float:
-        """
-        Reduce this Series to the product value.
-        """
+        """Reduce this Series to the product value."""
         return self.to_frame().select(pli.col(self.name).product()).to_series()[0]
 
     def min(self) -> int | float | date | datetime | timedelta:
@@ -874,7 +974,8 @@ class Series:
             quantile between 0.0 and 1.0
 
         interpolation
-            interpolation type, options: ['nearest', 'higher', 'lower', 'midpoint', 'linear']
+            interpolation type, options:
+            ['nearest', 'higher', 'lower', 'midpoint', 'linear']
 
         Examples
         --------
@@ -909,9 +1010,14 @@ class Series:
         """
         return pli.wrap_df(self._s.to_dummies())
 
-    def value_counts(self) -> pli.DataFrame:
+    def value_counts(self, sort: bool = False) -> pli.DataFrame:
         """
         Count the unique values in a Series.
+
+        Parameters
+        ----------
+        sort:
+            Ensure the output is sorted from most values to least.
 
         Examples
         --------
@@ -931,11 +1037,11 @@ class Series:
         └─────┴────────┘
 
         """
-        return pli.wrap_df(self._s.value_counts())
+        return pli.wrap_df(self._s.value_counts(sort))
 
     def unique_counts(self) -> Series:
         """
-        Returns a count of the unique values in the order of appearance.
+        Return a count of the unique values in the order of appearance.
 
         Examples
         --------
@@ -948,6 +1054,7 @@ class Series:
             2
             3
         ]
+
         """
         return pli.select(pli.lit(self).unique_counts()).to_series()
 
@@ -984,21 +1091,23 @@ class Series:
         Run an expression over a sliding window that increases `1` slot every iteration.
 
         .. warning::
-            This can be really slow as it can have `O(n^2)` complexity. Don't use this for operations
-            that visit all elements.
+            This can be really slow as it can have `O(n^2)` complexity. Don't use this
+            for operations that visit all elements.
 
         .. warning::
-            This API is experimental and may change without it being considered a breaking change.
+            This API is experimental and may change without it being considered a
+            breaking change.
 
         Parameters
         ----------
         expr
             Expression to evaluate
         min_periods
-            Number of valid values there should be in the window before the expression is evaluated.
-            valid values =  `length - null_count`
+            Number of valid values there should be in the window before the expression
+            is evaluated. valid values = `length - null_count`
         parallel
-            Run in parallel. Don't do this in a groupby or another operation that already has much parallelization.
+            Run in parallel. Don't do this in a groupby or another operation that
+            already has much parallelization.
 
         Examples
         --------
@@ -1021,14 +1130,12 @@ class Series:
 
     @property
     def name(self) -> str:
-        """
-        Get the name of this Series.
-        """
+        """Get the name of this Series."""
         return self._s.name()
 
     def alias(self, name: str) -> Series:
         """
-        Returns a copy of the Series with a new alias/name.
+        Return a copy of the Series with a new alias/name.
 
         Parameters
         ----------
@@ -1039,6 +1146,7 @@ class Series:
         --------
         >>> srs = pl.Series("x", [1, 2, 3])
         >>> new_aliased_srs = srs.alias("y")
+
         """
         s = self.clone()
         s._s.rename(name)
@@ -1087,15 +1195,11 @@ class Series:
             return self.alias(name)
 
     def chunk_lengths(self) -> list[int]:
-        """
-        Get the length of each individual chunk.
-        """
+        """Get the length of each individual chunk."""
         return self._s.chunk_lengths()
 
     def n_chunks(self) -> int:
-        """
-        Get the number of chunks that this Series contains.
-        """
+        """Get the number of chunks that this Series contains."""
         return self._s.n_chunks()
 
     def cumsum(self, reverse: bool = False) -> Series:
@@ -1261,23 +1365,28 @@ class Series:
         other
             Series to append.
         append_chunks
-            If set to `True` the append operation will add the chunks from `other` to self. This is super cheap.
+            If set to `True` the append operation will add the chunks from `other` to
+            self. This is super cheap.
 
-            if set to `False` the append operation will do the same as `DataFrame.extend` which:
-            extends the memory backed by this `Series` with the values from `other`.
+            If set to `False` the append operation will do the same as
+            `DataFrame.extend` which extends the memory backed by this `Series` with
+            the values from `other`.
 
-            Different from `append chunks`, `extent` appends the data from `other` to the underlying memory locations and
-            thus may cause a reallocation (which are expensive).
+            Different from `append chunks`, `extent` appends the data from `other` to
+            the underlying memory locations and thus may cause a reallocation (which are
+            expensive).
 
-            If this does not cause a reallocation, the resulting data structure will not have any extra chunks
-            and thus will yield faster queries.
+            If this does not cause a reallocation, the resulting data structure will not
+            have any extra chunks and thus will yield faster queries.
 
-            Prefer `extend` over `append_chunks` when you want to do a query after a single append. For instance during
-            online operations where you add `n` rows and rerun a query.
+            Prefer `extend` over `append_chunks` when you want to do a query after a
+            single append. For instance during online operations where you add `n` rows
+            and rerun a query.
 
-            Prefer `append_chunks` over `extend` when you want to append many times before doing a query. For instance
-            when you read in multiple files and when to store them in a single `Series`.
-            In the latter case, finish the sequence of `append_chunks` operations with a `rechunk`.
+            Prefer `append_chunks` over `extend` when you want to append many times
+            before doing a query. For instance when you read in multiple files and when
+            to store them in a single `Series`. In the latter case, finish the sequence
+            of `append_chunks` operations with a `rechunk`.
 
 
         Examples
@@ -1480,21 +1589,15 @@ class Series:
         return wrap_s(self._s.argsort(reverse, nulls_last))
 
     def arg_unique(self) -> Series:
-        """
-        Get unique index as Series.
-        """
+        """Get unique index as Series."""
         return wrap_s(self._s.arg_unique())
 
     def arg_min(self) -> int | None:
-        """
-        Get the index of the minimal value.
-        """
+        """Get the index of the minimal value."""
         return self._s.arg_min()
 
     def arg_max(self) -> int | None:
-        """
-        Get the index of the maximal value.
-        """
+        """Get the index of the maximal value."""
         return self._s.arg_max()
 
     def unique(self, maintain_order: bool = False) -> Series:
@@ -1549,15 +1652,16 @@ class Series:
         return wrap_s(self._s.take(indices))
 
     def null_count(self) -> int:
-        """
-        Count the null values in this Series.
-        """
+        """Count the null values in this Series."""
         return self._s.null_count()
 
     def has_validity(self) -> bool:
         """
-        Returns True if the Series has a validity bitmask. If there is none, it means that there are no null values.
+        Return True if the Series has a validity bitmask.
+
+        If there is none, it means that there are no null values.
         Use this to swiftly assert a Series does not have null values.
+
         """
         return self._s.has_validity()
 
@@ -1722,7 +1826,8 @@ class Series:
 
     def is_in(self, other: Series | list) -> Series:
         """
-        Check if elements of this Series are in the right Series, or List values of the right Series.
+        Check if elements of this Series are in the right Series, or List values of the
+        right Series.
 
         Returns
         -------
@@ -1780,6 +1885,7 @@ class Series:
         Returns
         -------
         UInt32 Series
+
         """
         return pli.arg_where(self, eager=True)
 
@@ -1814,6 +1920,7 @@ class Series:
         Returns
         -------
         Boolean Series
+
         """
         return wrap_s(self._s.is_first())
 
@@ -1865,6 +1972,7 @@ class Series:
         Returns
         -------
         Exploded Series of same dtype
+
         """
         return wrap_s(self._s.explode())
 
@@ -1881,7 +1989,8 @@ class Series:
         null_equal
             Consider null values as equal.
         strict
-            Don't allow different numerical dtypes, e.g. comparing `pl.UInt32` with a `pl.Int64` will return `False`.
+            Don't allow different numerical dtypes, e.g. comparing `pl.UInt32` with a
+            `pl.Int64` will return `False`.
 
         Examples
         --------
@@ -1910,9 +2019,7 @@ class Series:
 
     @property
     def shape(self) -> tuple[int]:
-        """
-        Shape of this Series.
-        """
+        """Shape of this Series."""
         return (self._s.len(),)
 
     def __len__(self) -> int:
@@ -1974,7 +2081,8 @@ class Series:
         Examples
         --------
         Replicating the pandas
-        `pd.Series.factorize <https://pandas.pydata.org/docs/reference/api/pandas.Series.factorize.html>`_
+        `pd.Series.factorize
+        <https://pandas.pydata.org/docs/reference/api/pandas.Series.factorize.html>`_
         method.
 
         >>> s = pl.Series("values", ["a", None, "x", "a"])
@@ -2036,6 +2144,7 @@ class Series:
         ----------
         in_place
             In place or not.
+
         """
         opt_s = self._s.rechunk(in_place)
         if in_place:
@@ -2058,6 +2167,7 @@ class Series:
             2
             1
         ]
+
         """
         return wrap_s(self._s.reverse())
 
@@ -2127,7 +2237,7 @@ class Series:
 
     def is_utf8(self) -> bool:
         """
-        Checks if this Series datatype is a Utf8.
+        Check if this Series datatype is a Utf8.
 
         Examples
         --------
@@ -2140,8 +2250,9 @@ class Series:
 
     def view(self, ignore_nulls: bool = False) -> np.ndarray:
         """
-        Get a view into this Series data with a numpy array. This operation doesn't clone data, but does not include
-        missing values. Don't use this unless you know what you are doing.
+        Get a view into this Series data with a numpy array. This operation doesn't
+        clone data, but does not include missing values. Don't use this unless you know
+        what you are doing.
 
         .. warning::
 
@@ -2178,9 +2289,7 @@ class Series:
         *inputs: Any,
         **kwargs: Any,
     ) -> Series:
-        """
-        Numpy universal functions.
-        """
+        """Numpy universal functions."""
         if not _NUMPY_AVAILABLE:
             raise ImportError("'numpy' is required for this functionality.")
 
@@ -2249,7 +2358,8 @@ class Series:
             return wrap_s(series)
         else:
             raise NotImplementedError(
-                f"Only `__call__` is implemented for numpy ufuncs on a Series, got `{method}`."
+                "Only `__call__` is implemented for numpy ufuncs on a Series, got"
+                f" `{method}`."
             )
 
     def to_numpy(
@@ -2262,7 +2372,8 @@ class Series:
 
         Notes
         -----
-        If you are attempting to convert Utf8 to an array you'll need to install `pyarrow`.
+        If you are attempting to convert Utf8 to an array you'll need to install
+        `pyarrow`.
 
         Examples
         --------
@@ -2283,9 +2394,10 @@ class Series:
             of nulls, or for non-primitive types).
         kwargs
             kwargs will be sent to pyarrow.Array.to_numpy
+
         """
 
-        def convert_to_date(arr):  # type: ignore
+        def convert_to_date(arr: np.ndarray) -> np.ndarray:
             if self.dtype == Date:
                 tp = "datetime64[D]"
             elif self.dtype == Duration:
@@ -2328,18 +2440,21 @@ class Series:
         return self._s.to_arrow()
 
     def to_pandas(self) -> pd.Series:
-        """
-        Convert this Series to a pandas Series
-        """
-        if not _PYARROW_AVAILABLE:
-            raise ImportError(  # pragma: no cover
-                "'pyarrow' is required for converting a 'polars' Series to a 'pandas' Series."
+        """Convert this Series to a pandas Series."""
+        if not _PYARROW_AVAILABLE:  # pragma: no cover
+            raise ImportError(
+                "'pyarrow' is required for converting a 'polars' Series to a 'pandas'"
+                " Series."
             )
         return self.to_arrow().to_pandas()
 
-    def set(self, filter: Series, value: int | float) -> Series:
+    def set(self, filter: Series, value: int | float | str) -> Series:
         """
         Set masked values.
+
+        .. note::
+            Using this is an anti-pattern.
+            Always prefer: `pl.when(predicate).then(value).otherwise(self)`
 
         Parameters
         ----------
@@ -2347,6 +2462,7 @@ class Series:
             Boolean mask.
         value
             Value to replace the the masked values with.
+
         """
         f = get_ffi_func("set_with_mask_<>", self.dtype, self._s)
         if f is None:
@@ -2356,10 +2472,24 @@ class Series:
     def set_at_idx(
         self,
         idx: Series | np.ndarray | list[int] | tuple[int],
-        value: int | float | str | bool,
+        value: int
+        | float
+        | str
+        | bool
+        | Sequence[int]
+        | Sequence[float]
+        | Sequence[date]
+        | Sequence[datetime]
+        | date
+        | datetime
+        | Series,
     ) -> Series:
         """
         Set values at the index locations.
+
+        .. note::
+            Using this is an anti-pattern.
+            Always prefer: `pl.when(predicate).then(value).otherwise(self)`
 
         Parameters
         ----------
@@ -2370,14 +2500,28 @@ class Series:
 
         Returns
         -------
-        New allocated Series
+        the series mutated
+
         """
+        if self.is_numeric() or self.is_datelike():
+            idx = Series("", idx)
+            if isinstance(value, (int, float, bool)):
+                value = Series("", [value])
+
+                # if we need to set more than a single value, we extend it
+                if len(idx) > 0:
+                    value = value.extend_constant(value[0], len(idx) - 1)
+            elif not isinstance(value, Series):
+                value = Series("", value)
+            self._s.set_at_idx(idx._s, value._s)
+            return self
 
         # the set_at_idx function expects a np.array of dtype u32
         f = get_ffi_func("set_at_idx_<>", self.dtype, self._s)
         if f is None:
             raise ValueError(
-                f"could not find the FFI function needed to set at idx for series {self._s}"
+                "could not find the FFI function needed to set at idx for series"
+                f" {self._s}"
             )
         if isinstance(idx, Series):
             # make sure the dtype matches
@@ -2396,11 +2540,13 @@ class Series:
                 raise ImportError("'numpy' is required for this functionality.")
             idx_array = np.array(idx, dtype=np.uint32)
 
-        return wrap_s(f(idx_array, value))
+        self._s = f(idx_array, value)
+        return self
 
     def cleared(self) -> "Series":
         """
-        Create an empty copy of the current Series, with identical name/dtype but no data.
+        Create an empty copy of the current Series, with identical name/dtype but no
+        data.
 
         See Also
         --------
@@ -2426,19 +2572,18 @@ class Series:
         --------
         cleared : Create an empty copy of the current Series, with identical
             schema but no data.
+
         """
         return wrap_s(self._s.clone())
 
     def __copy__(self) -> Series:
         return self.clone()
 
-    def __deepcopy__(self, memodict: Any = {}) -> Series:
+    def __deepcopy__(self, memo: None = None) -> Series:
         return self.clone()
 
     def fill_nan(self, fill_value: str | int | float | bool | pli.Expr) -> Series:
-        """
-        Fill floating point NaN value with a fill value
-        """
+        """Fill floating point NaN value with a fill value."""
         return (
             self.to_frame().select(pli.col(self.name).fill_nan(fill_value)).to_series()
         )
@@ -2498,17 +2643,21 @@ class Series:
 
     def floor(self) -> Series:
         """
-        Floor underlying floating point array to the lowest integers smaller or equal to the float value.
+        Floor underlying floating point array to the lowest integers smaller or equal to
+        the float value.
 
         Only works on floating point Series
+
         """
         return wrap_s(self._s.floor())
 
     def ceil(self) -> Series:
         """
-        Ceil underlying floating point array to the highest integers smaller or equal to the float value.
+        Ceil underlying floating point array to the highest integers smaller or equal to
+        the float value.
 
         Only works on floating point Series
+
         """
         return self.to_frame().select(pli.col(self.name).ceil()).to_series()
 
@@ -2532,6 +2681,7 @@ class Series:
         ----------
         decimals
             number of decimals to round by.
+
         """
         return wrap_s(self._s.round(decimals))
 
@@ -2550,6 +2700,7 @@ class Series:
         ----------
         other
             Series to compute dot product with
+
         """
         return self._s.dot(other._s)
 
@@ -2572,34 +2723,33 @@ class Series:
 
     def sign(self) -> Series:
         """
-        Returns an element-wise indication of the sign of a number.
+        Compute the element-wise indication of the sign.
 
         Examples
         --------
-        >>> s = pl.Series("foo", [-9, -8, 0, 4])
-        >>> s.sign()  #
-        shape: (4,)
-        Series: 'foo' [i64]
+        >>> s = pl.Series("a", [-9.0, -0.0, 0.0, 4.0, None])
+        >>> s.sign()
+        shape: (5,)
+        Series: 'a' [i64]
         [
                 -1
-                -1
+                0
                 0
                 1
+                null
         ]
 
         """
-        if not _NUMPY_AVAILABLE:
-            raise ImportError("'numpy' is required for this functionality.")
-        return np.sign(self)  # type: ignore
+        return self.to_frame().select(pli.col(self.name).sign()).to_series()
 
     def sin(self) -> Series:
         """
-        Compute the element-wise value for Trigonometric sine.
+        Compute the element-wise value for the sine.
 
         Examples
         --------
-        >>> import numpy as np
-        >>> s = pl.Series("a", np.array((0.0, np.pi / 2.0, np.pi)))
+        >>> import math
+        >>> s = pl.Series("a", [0.0, math.pi / 2.0, math.pi])
         >>> s.sin()
         shape: (3,)
         Series: 'a' [f64]
@@ -2610,18 +2760,16 @@ class Series:
         ]
 
         """
-        if not _NUMPY_AVAILABLE:
-            raise ImportError("'numpy' is required for this functionality.")
-        return np.sin(self)  # type: ignore
+        return self.to_frame().select(pli.col(self.name).sin()).to_series()
 
     def cos(self) -> Series:
         """
-        Compute the element-wise value for Trigonometric cosine.
+        Compute the element-wise value for the cosine.
 
         Examples
         --------
-        >>> import numpy as np
-        >>> s = pl.Series("a", np.array((0.0, np.pi / 2.0, np.pi)))
+        >>> import math
+        >>> s = pl.Series("a", [0.0, math.pi / 2.0, math.pi])
         >>> s.cos()
         shape: (3,)
         Series: 'a' [f64]
@@ -2632,18 +2780,16 @@ class Series:
         ]
 
         """
-        if not _NUMPY_AVAILABLE:
-            raise ImportError("'numpy' is required for this functionality.")
-        return np.cos(self)  # type: ignore
+        return self.to_frame().select(pli.col(self.name).cos()).to_series()
 
     def tan(self) -> Series:
         """
-        Compute the element-wise value for Trigonometric tangent.
+        Compute the element-wise value for the tangent.
 
         Examples
         --------
-        >>> import numpy as np
-        >>> s = pl.Series("a", np.array((0.0, np.pi / 2.0, np.pi)))
+        >>> import math
+        >>> s = pl.Series("a", [0.0, math.pi / 2.0, math.pi])
         >>> s.tan()
         shape: (3,)
         Series: 'a' [f64]
@@ -2654,18 +2800,15 @@ class Series:
         ]
 
         """
-        if not _NUMPY_AVAILABLE:
-            raise ImportError("'numpy' is required for this functionality.")
-        return np.tan(self)  # type: ignore
+        return self.to_frame().select(pli.col(self.name).tan()).to_series()
 
     def arcsin(self) -> Series:
         """
-        Compute the element-wise value for Trigonometric Inverse sine.
+        Compute the element-wise value for the inverse sine.
 
         Examples
         --------
-        >>> import numpy as np
-        >>> s = pl.Series("a", np.array((1.0, 0.0, -1)))
+        >>> s = pl.Series("a", [1.0, 0.0, -1.0])
         >>> s.arcsin()
         shape: (3,)
         Series: 'a' [f64]
@@ -2676,18 +2819,15 @@ class Series:
         ]
 
         """
-        if not _NUMPY_AVAILABLE:
-            raise ImportError("'numpy' is required for this functionality.")
-        return np.arcsin(self)  # type: ignore
+        return self.to_frame().select(pli.col(self.name).arcsin()).to_series()
 
     def arccos(self) -> Series:
         """
-        Compute the element-wise value for Trigonometric Inverse cosine.
+        Compute the element-wise value for the inverse cosine.
 
         Examples
         --------
-        >>> import numpy as np
-        >>> s = pl.Series("a", np.array((1.0, 0.0, -1)))
+        >>> s = pl.Series("a", [1.0, 0.0, -1.0])
         >>> s.arccos()
         shape: (3,)
         Series: 'a' [f64]
@@ -2698,18 +2838,15 @@ class Series:
         ]
 
         """
-        if not _NUMPY_AVAILABLE:
-            raise ImportError("'numpy' is required for this functionality.")
-        return np.arccos(self)  # type: ignore
+        return self.to_frame().select(pli.col(self.name).arccos()).to_series()
 
     def arctan(self) -> Series:
         """
-        Compute the element-wise value for Trigonometric Inverse tangent.
+        Compute the element-wise value for the inverse tangent.
 
         Examples
         --------
-        >>> import numpy as np
-        >>> s = pl.Series("a", np.array((1.0, 0.0, -1)))
+        >>> s = pl.Series("a", [1.0, 0.0, -1.0])
         >>> s.arctan()
         shape: (3,)
         Series: 'a' [f64]
@@ -2720,9 +2857,126 @@ class Series:
         ]
 
         """
-        if not _NUMPY_AVAILABLE:
-            raise ImportError("'numpy' is required for this functionality.")
-        return np.arctan(self)  # type: ignore
+        return self.to_frame().select(pli.col(self.name).arctan()).to_series()
+
+    def arcsinh(self) -> Series:
+        """
+        Compute the element-wise value for the inverse hyperbolic sine.
+
+        Examples
+        --------
+        >>> s = pl.Series("a", [1.0, 0.0, -1.0])
+        >>> s.arcsinh()
+        shape: (3,)
+        Series: 'a' [f64]
+        [
+            0.881374
+            0.0
+            -0.881374
+        ]
+
+        """
+        return self.to_frame().select(pli.col(self.name).arcsinh()).to_series()
+
+    def arccosh(self) -> Series:
+        """
+        Compute the element-wise value for the inverse hyperbolic cosine.
+
+        Examples
+        --------
+        >>> s = pl.Series("a", [5.0, 1.0, 0.0, -1.0])
+        >>> s.arccosh()
+        shape: (4,)
+        Series: 'a' [f64]
+        [
+            2.292432
+            0.0
+            NaN
+            NaN
+        ]
+
+        """
+        return self.to_frame().select(pli.col(self.name).arccosh()).to_series()
+
+    def arctanh(self) -> Series:
+        """
+        Compute the element-wise value for the inverse hyperbolic tangent.
+
+        Examples
+        --------
+        >>> s = pl.Series("a", [2.0, 1.0, 0.5, 0.0, -0.5, -1.0, -1.1])
+        >>> s.arctanh()
+        shape: (7,)
+        Series: 'a' [f64]
+        [
+            NaN
+            inf
+            0.549306
+            0.0
+            -0.549306
+            -inf
+            NaN
+        ]
+
+        """
+        return self.to_frame().select(pli.col(self.name).arctanh()).to_series()
+
+    def sinh(self) -> Series:
+        """
+        Compute the element-wise value for the hyperbolic sine.
+
+        Examples
+        --------
+        >>> s = pl.Series("a", [1.0, 0.0, -1.0])
+        >>> s.sinh()
+        shape: (3,)
+        Series: 'a' [f64]
+        [
+            1.175201
+            0.0
+            -1.175201
+        ]
+
+        """
+        return self.to_frame().select(pli.col(self.name).sinh()).to_series()
+
+    def cosh(self) -> Series:
+        """
+        Compute the element-wise value for the hyperbolic cosine.
+
+        Examples
+        --------
+        >>> s = pl.Series("a", [1.0, 0.0, -1.0])
+        >>> s.cosh()
+        shape: (3,)
+        Series: 'a' [f64]
+        [
+            1.543081
+            1.0
+            1.543081
+        ]
+
+        """
+        return self.to_frame().select(pli.col(self.name).cosh()).to_series()
+
+    def tanh(self) -> Series:
+        """
+        Compute the element-wise value for the hyperbolic tangent.
+
+        Examples
+        --------
+        >>> s = pl.Series("a", [1.0, 0.0, -1.0])
+        >>> s.tanh()
+        shape: (3,)
+        Series: 'a' [f64]
+        [
+            0.761594
+            0.0
+            -0.761594
+        ]
+
+        """
+        return self.to_frame().select(pli.col(self.name).tanh()).to_series()
 
     def apply(
         self,
@@ -2732,7 +2986,8 @@ class Series:
         """
         Apply a function over elements in this Series and return a new Series.
 
-        If the function returns another datatype, the return_dtype arg should be set, otherwise the method will fail.
+        If the function returns another datatype, the return_dtype arg should be set,
+        otherwise the method will fail.
 
         Examples
         --------
@@ -2751,11 +3006,13 @@ class Series:
         func
             function or lambda.
         return_dtype
-            Output datatype. If none is given, the same datatype as this Series will be used.
+            Output datatype. If none is given, the same datatype as this Series will be
+            used.
 
         Returns
         -------
         Series
+
         """
         if return_dtype is None:
             pl_return_dtype = None
@@ -2765,8 +3022,8 @@ class Series:
 
     def shift(self, periods: int = 1) -> Series:
         """
-        Shift the values by a given period and fill the parts that will be empty due to this operation
-        with `Nones`.
+        Shift the values by a given period and fill the parts that will be empty due to
+        this operation with `Nones`.
 
         Examples
         --------
@@ -2792,13 +3049,14 @@ class Series:
         ----------
         periods
             Number of places to shift (may be negative).
+
         """
         return wrap_s(self._s.shift(periods))
 
     def shift_and_fill(self, periods: int, fill_value: int | pli.Expr) -> Series:
         """
-        Shift the values by a given period and fill the parts that will be empty due to this operation
-        with the result of the `fill_value` expression.
+        Shift the values by a given period and fill the parts that will be empty due to
+        this operation with the result of the `fill_value` expression.
 
         Parameters
         ----------
@@ -2806,6 +3064,7 @@ class Series:
             Number of places to shift (may be negative).
         fill_value
             Fill None values with the result of this expression.
+
         """
         return self.to_frame().select(
             pli.col(self.name).shift_and_fill(periods, fill_value)
@@ -2813,7 +3072,8 @@ class Series:
 
     def zip_with(self, mask: Series, other: Series) -> Series:
         """
-        Where mask evaluates true, take values from self. Where mask evaluates false, take values from other.
+        Where mask evaluates true, take values from self. Where mask evaluates false,
+        take values from other.
 
         Parameters
         ----------
@@ -2863,10 +3123,11 @@ class Series:
         center: bool = False,
     ) -> Series:
         """
-        apply a rolling min (moving min) over the values in this array.
-        A window of length `window_size` will traverse the array. The values that fill this window
-        will (optionally) be multiplied with the weights given by the `weight` vector. The resulting
-        values will be aggregated to their sum.
+        Apply a rolling min (moving min) over the values in this array.
+
+        A window of length `window_size` will traverse the array. The values that fill
+        this window will (optionally) be multiplied with the weights given by the
+        `weight` vector. The resulting values will be aggregated to their sum.
 
         Parameters
         ----------
@@ -2876,8 +3137,8 @@ class Series:
             An optional slice with the same length as the window that will be multiplied
             elementwise with the values in the window.
         min_periods
-            The number of values in the window that should be non-null before computing a result.
-            If None, it will be set equal to window size.
+            The number of values in the window that should be non-null before computing
+            a result. If None, it will be set equal to window size.
         center
             Set the labels at the center of the window
 
@@ -2915,9 +3176,10 @@ class Series:
     ) -> Series:
         """
         Apply a rolling max (moving max) over the values in this array.
-        A window of length `window_size` will traverse the array. The values that fill this window
-        will (optionally) be multiplied with the weights given by the `weight` vector. The resulting
-        values will be aggregated to their sum.
+
+        A window of length `window_size` will traverse the array. The values that fill
+        this window will (optionally) be multiplied with the weights given by the
+        `weight` vector. The resulting values will be aggregated to their sum.
 
         Parameters
         ----------
@@ -2927,8 +3189,8 @@ class Series:
             An optional slice with the same length as the window that will be multiplied
             elementwise with the values in the window.
         min_periods
-            The number of values in the window that should be non-null before computing a result.
-            If None, it will be set equal to window size.
+            The number of values in the window that should be non-null before computing
+            a result. If None, it will be set equal to window size.
         center
             Set the labels at the center of the window
 
@@ -2966,9 +3228,9 @@ class Series:
     ) -> Series:
         """
         Apply a rolling mean (moving mean) over the values in this array.
-        A window of length `window_size` will traverse the array. The values that fill this window
-        will (optionally) be multiplied with the weights given by the `weight` vector. The resulting
-        values will be aggregated to their sum.
+        A window of length `window_size` will traverse the array. The values that fill
+        this window will (optionally) be multiplied with the weights given by the
+        `weight` vector. The resulting values will be aggregated to their sum.
 
         Parameters
         ----------
@@ -2978,8 +3240,8 @@ class Series:
             An optional slice with the same length as the window that will be multiplied
             elementwise with the values in the window.
         min_periods
-            The number of values in the window that should be non-null before computing a result.
-            If None, it will be set equal to window size.
+            The number of values in the window that should be non-null before computing
+            a result. If None, it will be set equal to window size.
         center
             Set the labels at the center of the window
 
@@ -3017,9 +3279,9 @@ class Series:
     ) -> Series:
         """
         Apply a rolling sum (moving sum) over the values in this array.
-        A window of length `window_size` will traverse the array. The values that fill this window
-        will (optionally) be multiplied with the weights given by the `weight` vector. The resulting
-        values will be aggregated to their sum.
+        A window of length `window_size` will traverse the array. The values that fill
+        this window will (optionally) be multiplied with the weights given by the
+        `weight` vector. The resulting values will be aggregated to their sum.
 
         Parameters
         ----------
@@ -3029,8 +3291,8 @@ class Series:
             An optional slice with the same length of the window that will be multiplied
             elementwise with the values in the window.
         min_periods
-            The number of values in the window that should be non-null before computing a result.
-            If None, it will be set equal to window size.
+            The number of values in the window that should be non-null before computing
+            a result. If None, it will be set equal to window size.
         center
             Set the labels at the center of the window
 
@@ -3069,9 +3331,9 @@ class Series:
         """
         Compute a rolling std dev
 
-        A window of length `window_size` will traverse the array. The values that fill this window
-        will (optionally) be multiplied with the weights given by the `weight` vector. The resulting
-        values will be aggregated to their sum.
+        A window of length `window_size` will traverse the array. The values that fill
+        this window will (optionally) be multiplied with the weights given by the
+        `weight` vector. The resulting values will be aggregated to their sum.
 
         Parameters
         ----------
@@ -3081,8 +3343,8 @@ class Series:
             An optional slice with the same length as the window that will be multiplied
             elementwise with the values in the window.
         min_periods
-            The number of values in the window that should be non-null before computing a result.
-            If None, it will be set equal to window size.
+            The number of values in the window that should be non-null before computing
+            a result. If None, it will be set equal to window size.
         center
             Set the labels at the center of the window
 
@@ -3107,9 +3369,9 @@ class Series:
         """
         Compute a rolling variance.
 
-        A window of length `window_size` will traverse the array. The values that fill this window
-        will (optionally) be multiplied with the weights given by the `weight` vector. The resulting
-        values will be aggregated to their sum.
+        A window of length `window_size` will traverse the array. The values that fill
+        this window will (optionally) be multiplied with the weights given by the
+        `weight` vector. The resulting values will be aggregated to their sum.
 
         Parameters
         ----------
@@ -3119,8 +3381,8 @@ class Series:
             An optional slice with the same length as the window that will be multiplied
             elementwise with the values in the window.
         min_periods
-            The number of values in the window that should be non-null before computing a result.
-            If None, it will be set equal to window size.
+            The number of values in the window that should be non-null before computing
+            a result. If None, it will be set equal to window size.
         center
             Set the labels at the center of the window
 
@@ -3144,9 +3406,9 @@ class Series:
         center: bool = False,
     ) -> pli.Series:
         """
-        Allows a custom rolling window function.
-        Prefer the specific rolling window functions over this one, as they are faster.
-        Prefer:
+        Apply a custom rolling window function.
+
+        Prefer the specific rolling window functions over this one, as they are faster:
 
             * rolling_min
             * rolling_max
@@ -3163,8 +3425,8 @@ class Series:
             An optional slice with the same length as the window that will be multiplied
             elementwise with the values in the window.
         min_periods
-            The number of values in the window that should be non-null before computing a result.
-            If None, it will be set equal to window size.
+            The number of values in the window that should be non-null before computing
+            a result. If None, it will be set equal to window size.
         center
             Set the labels at the center of the window
 
@@ -3209,8 +3471,8 @@ class Series:
             An optional slice with the same length as the window that will be multiplied
             elementwise with the values in the window.
         min_periods
-            The number of values in the window that should be non-null before computing a result.
-            If None, it will be set equal to window size.
+            The number of values in the window that should be non-null before computing
+            a result. If None, it will be set equal to window size.
         center
             Set the labels at the center of the window
 
@@ -3245,15 +3507,16 @@ class Series:
         quantile
             quantile to compute
         interpolation
-            interpolation type, options: ['nearest', 'higher', 'lower', 'midpoint', 'linear']
+            interpolation type, options:
+            ['nearest', 'higher', 'lower', 'midpoint', 'linear']
         window_size
             The length of the window.
         weights
             An optional slice with the same length as the window that will be multiplied
             elementwise with the values in the window.
         min_periods
-            The number of values in the window that should be non-null before computing a result.
-            If None, it will be set equal to window size.
+            The number of values in the window that should be non-null before computing
+            a result. If None, it will be set equal to window size.
         center
             Set the labels at the center of the window
 
@@ -3281,6 +3544,7 @@ class Series:
             Size of the rolling window
         bias
             If False, then the calculations are corrected for statistical bias.
+
         """
         return self.to_frame().select(
             pli.col(self.name).rolling_skew(window_size, bias)
@@ -3402,7 +3666,8 @@ class Series:
 
     def shrink_to_fit(self, in_place: bool = False) -> Series | None:
         """
-        Shrink memory usage of this Series to fit the exact capacity needed to hold the data.
+        Shrink memory usage of this Series to fit the exact capacity needed to hold the
+        data.
         """
         if in_place:
             self._s.shrink_to_fit()
@@ -3412,7 +3677,14 @@ class Series:
             series._s.shrink_to_fit()
             return series
 
-    def hash(self, k0: int = 0, k1: int = 1, k2: int = 2, k3: int = 3) -> pli.Series:
+    @deprecated_alias(k0="seed", k1="seed_1", k2="seed_2", k3="seed_3")
+    def hash(
+        self,
+        seed: int = 0,
+        seed_1: int | None = None,
+        seed_2: int | None = None,
+        seed_3: int | None = None,
+    ) -> pli.Series:
         """
         Hash the Series.
 
@@ -3420,41 +3692,46 @@ class Series:
 
         Parameters
         ----------
-        k0
-            Seed parameter.
-        k1
-            Seed parameter.
-        k2
-            Seed parameter.
-        k3
-            Seed parameter.
+        seed
+            Random seed parameter. Defaults to 0.
+        seed_1
+            Random seed parameter. Defaults to `seed` if not set.
+        seed_2
+            Random seed parameter. Defaults to `seed` if not set.
+        seed_3
+            Random seed parameter. Defaults to `seed` if not set.
 
         Examples
         --------
         >>> s = pl.Series("a", [1, 2, 3])
-        >>> s.hash(k0=42)
+        >>> s.hash(seed=42)
         shape: (3,)
         Series: 'a' [u64]
         [
-            16679613936015749658
-            17801292685721255234
-            516997424509290289
+            89438004737668041
+            14107061265552512458
+            15437026767517145468
         ]
 
         """
+        k0 = seed
+        k1 = seed_1 if seed_1 is not None else seed
+        k2 = seed_2 if seed_2 is not None else seed
+        k3 = seed_3 if seed_3 is not None else seed
         return wrap_s(self._s.hash(k0, k1, k2, k3))
 
     def reinterpret(self, signed: bool = True) -> Series:
         """
         Reinterpret the underlying bits as a signed/unsigned integer.
+
         This operation is only allowed for 64bit integers. For lower bits integers,
         you can safely use that cast operation.
 
         Parameters
         ----------
         signed
-            True -> pl.Int64
-            False -> pl.UInt64
+            If True, reinterpret as `pl.Int64`. Otherwise, reinterpret as `pl.UInt64`.
+
         """
         return wrap_s(self._s.reinterpret(signed))
 
@@ -3480,9 +3757,7 @@ class Series:
         return wrap_s(self._s.interpolate())
 
     def abs(self) -> Series:
-        """
-        Take absolute values
-        """
+        """Compute absolute values."""
         return wrap_s(self._s.abs())
 
     def rank(self, method: str = "average", reverse: bool = False) -> Series:
@@ -3491,26 +3766,57 @@ class Series:
 
         Parameters
         ----------
-        method
-            {'average', 'min', 'max', 'dense', 'ordinal', 'random'}, optional
+        method : {'average', 'min', 'max', 'dense', 'ordinal', 'random'}, optional
             The method used to assign ranks to tied elements.
             The following methods are available (default is 'average'):
-            - 'average': The average of the ranks that would have been assigned to
-            all the tied values is assigned to each value.
-            - 'min': The minimum of the ranks that would have been assigned to all
-            the tied values is assigned to each value.  (This is also
-            referred to as "competition" ranking.)
-            - 'max': The maximum of the ranks that would have been assigned to all
-            the tied values is assigned to each value.
-            - 'dense': Like 'min', but the rank of the next highest element is
-            assigned the rank immediately after those assigned to the tied
-            elements.
-            - 'ordinal': All values are given a distinct rank, corresponding to
-            the order that the values occur in `a`.
-            - 'random': Like 'ordinal', but the rank for ties is not dependent
-            on the order that the values occur in `a`.
+
+            - 'average' : The average of the ranks that would have been assigned to
+              all the tied values is assigned to each value.
+            - 'min' : The minimum of the ranks that would have been assigned to all
+              the tied values is assigned to each value. (This is also referred to
+              as "competition" ranking.)
+            - 'max' : The maximum of the ranks that would have been assigned to all
+              the tied values is assigned to each value.
+            - 'dense' : Like 'min', but the rank of the next highest element is
+              assigned the rank immediately after those assigned to the tied
+              elements.
+            - 'ordinal' : All values are given a distinct rank, corresponding to
+              the order that the values occur in the Series.
+            - 'random' : Like 'ordinal', but the rank for ties is not dependent
+              on the order that the values occur in the Series.
         reverse
-            reverse the operation
+            Reverse the operation.
+
+        Examples
+        --------
+        The 'average' method:
+
+        >>> s = pl.Series("a", [3, 6, 1, 1, 6])
+        >>> s.rank()
+        shape: (5,)
+        Series: 'a' [f32]
+        [
+            3.0
+            4.5
+            1.5
+            1.5
+            4.5
+        ]
+
+        The 'ordinal' method:
+
+        >>> s = pl.Series("a", [3, 6, 1, 1, 6])
+        >>> s.rank("ordinal")
+        shape: (5,)
+        Series: 'a' [u32]
+        [
+            3
+            4
+            1
+            2
+            5
+        ]
+
         """
         return wrap_s(self._s.rank(method, reverse))
 
@@ -3524,6 +3830,7 @@ class Series:
             number of slots to shift
         null_behavior
             {'ignore', 'drop'}
+
         """
         return wrap_s(self._s.diff(n, null_behavior))
 
@@ -3570,11 +3877,14 @@ class Series:
             3.0
             3.0
         ]
+
         """
         return self.to_frame().select(pli.col(self.name).pct_change(n)).to_series()
 
     def skew(self, bias: bool = True) -> float | None:
-        r"""Compute the sample skewness of a data set.
+        r"""
+        Compute the sample skewness of a data set.
+
         For normally distributed data, the skewness should be about zero. For
         unimodal continuous distributions, a skewness value greater than zero means
         that there is more weight in the right tail of the distribution. The
@@ -3606,13 +3916,16 @@ class Series:
         corrected for bias and the value computed is the adjusted
         Fisher-Pearson standardized moment coefficient, i.e.
 
-        .. math::  G_1=\frac{k_3}{k_2^{3/2}}=\frac{\sqrt{N(N-1)}}{N-2}\frac{m_3}{m_2^{3/2}}
+        .. math::
+            G_1 = \frac{k_3}{k_2^{3/2}} = \frac{\sqrt{N(N-1)}}{N-2}\frac{m_3}{m_2^{3/2}}
 
         """
         return self._s.skew(bias)
 
     def kurtosis(self, fisher: bool = True, bias: bool = True) -> float | None:
-        """Compute the kurtosis (Fisher or Pearson) of a dataset.
+        """
+        Compute the kurtosis (Fisher or Pearson) of a dataset.
+
         Kurtosis is the fourth central moment divided by the square of the
         variance. If Fisher's definition is used, then 3.0 is subtracted from
         the result to give 0.0 for a normal distribution.
@@ -3628,17 +3941,19 @@ class Series:
             Pearson's definition is used (normal ==> 3.0).
         bias : bool, optional
             If False, then the calculations are corrected for statistical bias.
+
         """
         return self._s.kurtosis(fisher, bias)
 
     def clip(self, min_val: int | float, max_val: int | float) -> Series:
         """
-        Clip (limit) the values in an array to any value that fits in 64 floating point range.
+        Clip (limit) the values in an array to any value that fits in 64 floating point
+        range.
 
         Only works for the following dtypes: {Int32, Int64, Float32, Float64, UInt32}.
 
-        If you want to clip other dtypes, consider writing a "when, then, otherwise" expression.
-        See :func:`when` for more information.
+        If you want to clip other dtypes, consider writing a "when, then, otherwise"
+        expression. See :func:`when` for more information.
 
         Parameters
         ----------
@@ -3680,6 +3995,7 @@ class Series:
         Returns
         -------
         Series
+
         """
         return wrap_s(self._s.reshape(dims))
 
@@ -3691,6 +4007,7 @@ class Series:
         ----------
         seed
             Seed initialization
+
         """
         return wrap_s(self._s.shuffle(seed))
 
@@ -3709,20 +4026,27 @@ class Series:
         Parameters
         ----------
         com
-            Specify decay in terms of center of mass, :math:`alpha = 1/(1 + com) \;for\; com >= 0`.
+            Specify decay in terms of center of mass,
+            :math:`alpha = 1/(1 + com) \;for\; com >= 0`.
         span
-            Specify decay in terms of span, :math:`alpha = 2/(span + 1) \;for\; span >= 1`
+            Specify decay in terms of span,
+            :math:`alpha = 2/(span + 1) \;for\; span >= 1`
         half_life
-            Specify decay in terms of half-life, :math:`alpha = 1 - exp(-ln(2) / halflife) \;for\; halflife > 0`
+            Specify decay in terms of half-life,
+            :math:`alpha = 1 - exp(-ln(2) / halflife) \;for\; halflife > 0`
         alpha
-            Specify smoothing factor alpha directly, :math:`0 < alpha < 1`.
+            Specify smoothing factor alpha directly,
+            :math:`0 < alpha < 1`.
         adjust
-            Divide by decaying adjustment factor in beginning periods to account for imbalance in relative weightings
+            Divide by decaying adjustment factor in beginning periods to account for
+            imbalance in relative weightings
 
-                - When adjust = True the EW function is calculated using weights :math:`w_i = (1 - alpha)^i`
+                - When adjust = True the EW function is calculated using weights
+                    :math:`w_i = (1 - alpha)^i`
                 - When adjust = False the EW function is calculated recursively.
         min_periods
-            Minimum number of observations in window required to have a value (otherwise result is Null).
+            Minimum number of observations in window required to have a value
+            (otherwise result is Null).
 
         """
         return (
@@ -3750,20 +4074,27 @@ class Series:
         Parameters
         ----------
         com
-            Specify decay in terms of center of mass, :math:`alpha = 1/(1 + com) \;for\; com >= 0`.
+            Specify decay in terms of center of mass,
+            :math:`alpha = 1/(1 + com) \;for\; com >= 0`.
         span
-            Specify decay in terms of span, :math:`alpha = 2/(span + 1) \;for\; span >= 1`
+            Specify decay in terms of span,
+            :math:`alpha = 2/(span + 1) \;for\; span >= 1`
         half_life
-            Specify decay in terms of half-life, :math:`alpha = 1 - exp(-ln(2) / halflife) \;for\; halflife > 0`
+            Specify decay in terms of half-life,
+            :math:`alpha = 1 - exp(-ln(2) / halflife) \;for\; halflife > 0`
         alpha
-            Specify smoothing factor alpha directly, :math:`0 < alpha < 1`.
+            Specify smoothing factor alpha directly,
+            :math:`0 < alpha < 1`.
         adjust
-            Divide by decaying adjustment factor in beginning periods to account for imbalance in relative weightings
+            Divide by decaying adjustment factor in beginning periods to account for
+            imbalance in relative weightings
 
-                - When adjust = True the EW function is calculated using weights :math:`w_i = (1 - alpha)^i`
+                - When adjust = True the EW function is calculated using weights
+                    :math:`w_i = (1 - alpha)^i`
                 - When adjust = False the EW function is calculated recursively.
         min_periods
-            Minimum number of observations in window required to have a value (otherwise result is Null).
+            Minimum number of observations in window required to have a value
+            (otherwise result is Null).
 
         """
         return (
@@ -3791,20 +4122,26 @@ class Series:
         Parameters
         ----------
         com
-            Specify decay in terms of center of mass, :math:`alpha = 1/(1 + com) \;for\; com >= 0`.
+            Specify decay in terms of center of mass,
+            :math:`alpha = 1/(1 + com) \;for\; com >= 0`.
         span
-            Specify decay in terms of span, :math:`alpha = 2/(span + 1) \;for\; span >= 1`
+            Specify decay in terms of span,
+            :math:`alpha = 2/(span + 1) \;for\; span >= 1`
         half_life
-            Specify decay in terms of half-life, :math:`alpha = 1 - exp(-ln(2) / halflife) \;for\; halflife > 0`
+            Specify decay in terms of half-life,
+            :math:`alpha = 1 - exp(-ln(2) / halflife) \;for\; halflife > 0`
         alpha
             Specify smoothing factor alpha directly, :math:`0 < alpha < 1`.
         adjust
-            Divide by decaying adjustment factor in beginning periods to account for imbalance in relative weightings
+            Divide by decaying adjustment factor in beginning periods to account for
+            imbalance in relative weightings
 
-                - When adjust = True the EW function is calculated using weights :math:`w_i = (1 - alpha)^i`
+                - When adjust = True the EW function is calculated using weights
+                    :math:`w_i = (1 - alpha)^i`
                 - When adjust = False the EW function is calculated recursively.
         min_periods
-            Minimum number of observations in window required to have a value (otherwise result is Null).
+            Minimum number of observations in window required to have a value
+            (otherwise result is Null).
 
         """
         return (
@@ -3824,7 +4161,8 @@ class Series:
         Parameters
         ----------
         value
-            The value to extend the Series with. This value may be None to fill with nulls.
+            The value to extend the Series with. This value may be None to fill with
+            nulls.
         n
             The number of values to extend.
 
@@ -3858,52 +4196,42 @@ class Series:
         ----------
         reverse
             If the `Series` order is reversed, e.g. descending.
+
         """
         return wrap_s(self._s.set_sorted(reverse))
 
     @property
     def time_unit(self) -> str | None:
-        """
-        Get the time unit of underlying Datetime Series as {"ns", "us", "ms"}
-        """
+        """Get the time unit of underlying Datetime Series as {"ns", "us", "ms"}."""
         return self._s.time_unit()
 
-    # Below are the namespaces defined. Do not move these up in the definition of Series, as it confuses mypy between the
-    # type annotation `str` and the namespace "str
+    # Below are the namespaces defined. Do not move these up in the definition of
+    # Series, as it confuses mypy between the type annotation `str` and the
+    # namespace `str`
 
     @property
     def dt(self) -> DateTimeNameSpace:
-        """
-        Create an object namespace of all datetime related methods.
-        """
+        """Create an object namespace of all datetime related methods."""
         return DateTimeNameSpace(self)
 
     @property
     def arr(self) -> ListNameSpace:
-        """
-        Create an object namespace of all list related methods.
-        """
+        """Create an object namespace of all list related methods."""
         return ListNameSpace(self)
 
     @property
     def str(self) -> StringNameSpace:
-        """
-        Create an object namespace of all string related methods.
-        """
+        """Create an object namespace of all string related methods."""
         return StringNameSpace(self)
 
     @property
     def cat(self) -> CatNameSpace:
-        """
-        Create an object namespace of all categorical related methods.
-        """
+        """Create an object namespace of all categorical related methods."""
         return CatNameSpace(self)
 
     @property
     def struct(self) -> StructNameSpace:
-        """
-        Create an object namespace of all struct related methods.
-        """
+        """Create an object namespace of all struct related methods."""
         return StructNameSpace(self)
 
 
@@ -3912,27 +4240,24 @@ class StructNameSpace:
         self.s = s
 
     def to_frame(self) -> pli.DataFrame:
-        """
-        Convert this Struct Series to a DataFrame
-        """
+        """Convert this Struct Series to a DataFrame."""
         return pli.wrap_df(self.s._s.struct_to_frame())
 
     def field(self, name: str) -> Series:
         """
-        Retrieve one of the fields of this `Struct` as a new Series
+        Retrieve one of the fields of this `Struct` as a new Series.
 
         Parameters
         ----------
         name
             Name of the field
+
         """
         return pli.select(pli.lit(self.s).struct.field(name)).to_series()
 
     @property
     def fields(self) -> list[str]:
-        """
-        Get the names of the fields
-        """
+        """Get the names of the fields."""
         return self.s._s.struct_fields()
 
     def rename_fields(self, names: list[str]) -> Series:
@@ -3943,14 +4268,13 @@ class StructNameSpace:
         ----------
         names
             New names in the order of the struct's fields
+
         """
         return pli.select(pli.lit(self.s).struct.rename_fields(names)).to_series()
 
 
 class StringNameSpace:
-    """
-    Series.str namespace.
-    """
+    """Series.str namespace."""
 
     def __init__(self, series: Series):
         self._s = series._s
@@ -3971,7 +4295,8 @@ class StringNameSpace:
             Date, Datetime or Time.
         fmt
             Format to use, refer to the
-            `chrono strftime documentation <https://docs.rs/chrono/latest/chrono/format/strftime/index.html>`_
+            `chrono strftime documentation
+            <https://docs.rs/chrono/latest/chrono/format/strftime/index.html>`_
             for specification. Example: ``"%y-%m-%d"``.
         strict
             Raise an error if any conversion fails.
@@ -4023,7 +4348,6 @@ class StringNameSpace:
         └────────────┘
 
         """
-
         s = wrap_s(self._s)
         return (
             s.to_frame()
@@ -4142,6 +4466,7 @@ class StringNameSpace:
         --------
         contains : Check if string contains a substring that matches a regex.
         starts_with : Check if string values start with a substring.
+
         """
         s = wrap_s(self._s)
         return s.to_frame().select(pli.col(s.name).str.ends_with(sub)).to_series()
@@ -4171,13 +4496,14 @@ class StringNameSpace:
         --------
         contains : Check if string contains a substring that matches a regex.
         ends_with : Check if string values end with a substring.
+
         """
         s = wrap_s(self._s)
         return s.to_frame().select(pli.col(s.name).str.starts_with(sub)).to_series()
 
     def decode(self, encoding: str, strict: bool = False) -> Series:
         """
-        Decodes a value using the provided encoding.
+        Decode a value using the provided encoding.
 
         Parameters
         ----------
@@ -4199,6 +4525,7 @@ class StringNameSpace:
             "bar"
             null
         ]
+
         """
         if encoding == "hex":
             return wrap_s(self._s.str_hex_decode(strict))
@@ -4209,7 +4536,7 @@ class StringNameSpace:
 
     def encode(self, encoding: str) -> Series:
         """
-        Encodes a value using the provided encoding
+        Encode a value using the provided encoding
 
         Parameters
         ----------
@@ -4231,6 +4558,7 @@ class StringNameSpace:
             "626172"
             null
         ]
+
         """
         if encoding == "hex":
             return wrap_s(self._s.str_hex_encode())
@@ -4255,7 +4583,8 @@ class StringNameSpace:
 
         Returns
         -------
-        Utf8 array. Contain null if original value is null or the json_path return nothing.
+        Utf8 array. Contain null if original value is null or the json_path return
+        nothing.
 
         Examples
         --------
@@ -4323,7 +4652,8 @@ class StringNameSpace:
 
     def extract_all(self, pattern: str) -> Series:
         r"""
-        Extract each successive non-overlapping regex match in an individual string as an array
+        Extract each successive non-overlapping regex match in an individual string as
+        an array
 
         Parameters
         ----------
@@ -4332,7 +4662,8 @@ class StringNameSpace:
 
         Returns
         -------
-        List[Utf8] array. Contain null if original value is null or regex capture nothing.
+        List[Utf8] array. Contain null if original value is null or regex capture
+        nothing.
 
         Examples
         --------
@@ -4435,7 +4766,8 @@ class StringNameSpace:
         │ {"d","4"}   │
         └─────────────┘
 
-        Split column in ``n`` fields, give them a proper name in the struct and add them as columns.
+        Split column in ``n`` fields, give them a proper name in the struct and add them
+        as columns.
 
         >>> df.select(
         ...     [
@@ -4472,9 +4804,9 @@ class StringNameSpace:
             .to_series()
         )
 
-    def replace(self, pattern: str, value: str) -> Series:
-        """
-        Replace first regex match with a string value.
+    def replace(self, pattern: str, value: str, literal: bool = False) -> Series:
+        r"""
+        Replace first matching regex/literal substring with a new string value.
 
         Parameters
         ----------
@@ -4482,10 +4814,12 @@ class StringNameSpace:
             A valid regex pattern.
         value
             Substring to replace.
+        literal
+             Treat pattern as a literal string.
 
         See Also
         --------
-        replace_all : Replace all regex matches with a string value.
+        replace_all : Replace all matching regex/literal substrings.
 
         Examples
         --------
@@ -4499,11 +4833,11 @@ class StringNameSpace:
         ]
 
         """
-        return wrap_s(self._s.str_replace(pattern, value))
+        return wrap_s(self._s.str_replace(pattern, value, literal))
 
-    def replace_all(self, pattern: str, value: str) -> Series:
+    def replace_all(self, pattern: str, value: str, literal: bool = False) -> Series:
         """
-        Replace all regex matches with a string value.
+        Replace all matching regex/literal substrings with a new string value.
 
         Parameters
         ----------
@@ -4511,10 +4845,12 @@ class StringNameSpace:
             A valid regex pattern.
         value
             Substring to replace.
+        literal
+             Treat pattern as a literal string.
 
         See Also
         --------
-        replace : Replace first regex match with a string value.
+        replace : Replace first matching regex/literal substring.
 
         Examples
         --------
@@ -4526,41 +4862,37 @@ class StringNameSpace:
             "-bc-bc"
             "123-123"
         ]
+
         """
-        return wrap_s(self._s.str_replace_all(pattern, value))
+        return wrap_s(self._s.str_replace_all(pattern, value, literal))
 
     def strip(self) -> Series:
-        """
-        Remove leading and trailing whitespace.
-        """
+        """Remove leading and trailing whitespace."""
         s = wrap_s(self._s)
         return s.to_frame().select(pli.col(s.name).str.strip()).to_series()
 
     def lstrip(self) -> Series:
-        """
-        Remove leading whitespace.
-        """
+        """Remove leading whitespace."""
         s = wrap_s(self._s)
         return s.to_frame().select(pli.col(s.name).str.lstrip()).to_series()
 
     def rstrip(self) -> Series:
-        """
-        Remove trailing whitespace.
-        """
+        """Remove trailing whitespace."""
         s = wrap_s(self._s)
         return s.to_frame().select(pli.col(s.name).str.rstrip()).to_series()
 
     def zfill(self, alignment: int) -> Series:
         """
-        Return a copy of the string left filled with ASCII '0' digits to make a string of length width.
-        A leading sign prefix ('+'/'-') is handled by inserting the padding after the sign character
-        rather than before.
+        Return a copy of the string left filled with ASCII '0' digits to make a string
+        of length width. A leading sign prefix ('+'/'-') is handled by inserting the
+        padding after the sign character rather than before.
         The original string is returned if width is less than or equal to ``len(s)``.
 
         Parameters
         ----------
         alignment
             Fill the value up to this length.
+
         """
         s = wrap_s(self._s)
         return s.to_frame().select(pli.col(s.name).str.zfill(alignment)).to_series()
@@ -4569,8 +4901,8 @@ class StringNameSpace:
         """
         Return the string left justified in a string of length ``width``.
 
-        Padding is done using the specified ``fillchar``.
-        The original string is returned if ``width`` is less than or equal to ``len(s)``.
+        Padding is done using the specified ``fillchar``. The original string is
+        returned if ``width`` is less than or equal to``len(s)``.
 
         Parameters
         ----------
@@ -4602,8 +4934,8 @@ class StringNameSpace:
         """
         Return the string right justified in a string of length ``width``.
 
-        Padding is done using the specified ``fillchar``.
-        The original string is returned if ``width`` is less than or equal to ``len(s)``.
+        Padding is done using the specified ``fillchar``. The original string is
+        returned if ``width`` is less than or equal to ``len(s)``.
 
         Parameters
         ----------
@@ -4632,15 +4964,11 @@ class StringNameSpace:
         )
 
     def to_lowercase(self) -> Series:
-        """
-        Modify the strings to their lowercase equivalent.
-        """
+        """Modify the strings to their lowercase equivalent."""
         return wrap_s(self._s.str_to_lowercase())
 
     def to_uppercase(self) -> Series:
-        """
-        Modify the strings to their uppercase equivalent.
-        """
+        """Modify the strings to their uppercase equivalent."""
         return wrap_s(self._s.str_to_uppercase())
 
     def slice(self, start: int, length: int | None = None) -> Series:
@@ -4653,19 +4981,44 @@ class StringNameSpace:
             Starting index of the slice (zero-indexed). Negative indexing
             may be used.
         length
-            Optional length of the slice.
+            Optional length of the slice. If None (default), the slice is taken to the
+            end of the string.
 
         Returns
         -------
         Series of Utf8 type
+
+        Examples
+        --------
+        >>> s = pl.Series("s", ["pear", None, "papaya", "dragonfruit"])
+        >>> s.str.slice(-3)
+        shape: (4,)
+        Series: 's' [str]
+        [
+            "ear"
+            null
+            "aya"
+            "uit"
+        ]
+
+        Using the optional `length` parameter
+
+        >>> s.str.slice(4, length=3)
+        shape: (4,)
+        Series: 's' [str]
+        [
+            ""
+            null
+            "ya"
+            "onf"
+        ]
+
         """
         return wrap_s(self._s.str_slice(start, length))
 
 
 class ListNameSpace:
-    """
-    Series.arr namespace.
-    """
+    """Series.arr namespace."""
 
     def __init__(self, series: Series):
         self._s = series._s
@@ -4689,45 +5042,31 @@ class ListNameSpace:
         return wrap_s(self._s.arr_lengths())
 
     def sum(self) -> Series:
-        """
-        Sum all the arrays in the list
-        """
+        """Sum all the arrays in the list."""
         return pli.select(pli.lit(wrap_s(self._s)).arr.sum()).to_series()
 
     def max(self) -> Series:
-        """
-        Compute the max value of the arrays in the list
-        """
+        """Compute the max value of the arrays in the list."""
         return pli.select(pli.lit(wrap_s(self._s)).arr.max()).to_series()
 
     def min(self) -> Series:
-        """
-        Compute the min value of the arrays in the list
-        """
+        """Compute the min value of the arrays in the list."""
         return pli.select(pli.lit(wrap_s(self._s)).arr.min()).to_series()
 
     def mean(self) -> Series:
-        """
-        Compute the mean value of the arrays in the list
-        """
+        """Compute the mean value of the arrays in the list."""
         return pli.select(pli.lit(wrap_s(self._s)).arr.mean()).to_series()
 
     def sort(self, reverse: bool = False) -> Series:
-        """
-        Sort the arrays in the list
-        """
+        """Sort the arrays in the list."""
         return pli.select(pli.lit(wrap_s(self._s)).arr.sort(reverse)).to_series()
 
     def reverse(self) -> Series:
-        """
-        Reverse the arrays in the list
-        """
+        """Reverse the arrays in the list."""
         return pli.select(pli.lit(wrap_s(self._s)).arr.reverse()).to_series()
 
     def unique(self) -> Series:
-        """
-        Get the unique/distinct values in the list
-        """
+        """Get the unique/distinct values in the list."""
         return pli.select(pli.lit(wrap_s(self._s)).arr.unique()).to_series()
 
     def concat(self, other: list[Series] | Series | list[Any]) -> Series:
@@ -4738,6 +5077,7 @@ class ListNameSpace:
         ----------
         other
             Columns to concat into a List Series
+
         """
         s = wrap_s(self._s)
         return s.to_frame().select(pli.col(s.name).arr.concat(other)).to_series()
@@ -4753,6 +5093,7 @@ class ListNameSpace:
         ----------
         index
             Index to return per sublist
+
         """
         return pli.select(pli.lit(wrap_s(self._s)).arr.get(index)).to_series()
 
@@ -4785,15 +5126,11 @@ class ListNameSpace:
         return pli.select(pli.lit(wrap_s(self._s)).arr.join(separator)).to_series()
 
     def first(self) -> Series:
-        """
-        Get the first value of the sublists.
-        """
+        """Get the first value of the sublists."""
         return self.get(0)
 
     def last(self) -> Series:
-        """
-        Get the last value of the sublists.
-        """
+        """Get the last value of the sublists."""
         return self.get(-1)
 
     def contains(self, item: float | str | bool | int | date | datetime) -> Series:
@@ -4808,6 +5145,7 @@ class ListNameSpace:
         Returns
         -------
         Boolean mask
+
         """
         s = pli.Series("", [item])
         s_list = wrap_s(self._s)
@@ -4821,6 +5159,7 @@ class ListNameSpace:
         Returns
         -------
         Series of dtype UInt32/UInt64 (depending on compilation)
+
         """
         return pli.select(pli.lit(wrap_s(self._s)).arr.arg_min()).to_series()
 
@@ -4831,6 +5170,7 @@ class ListNameSpace:
         Returns
         -------
         Series of dtype UInt32/UInt64 (depending on compilation)
+
         """
         return pli.select(pli.lit(wrap_s(self._s)).arr.arg_max()).to_series()
 
@@ -4855,6 +5195,7 @@ class ListNameSpace:
             [null, 1, ... 1]
             [null, -8, -1]
         ]
+
         """
         return pli.select(
             pli.lit(wrap_s(self._s)).arr.diff(n, null_behavior)
@@ -4862,8 +5203,8 @@ class ListNameSpace:
 
     def shift(self, periods: int = 1) -> Series:
         """
-        Shift the values by a given period and fill the parts that will be empty due to this operation
-        with nulls.
+        Shift the values by a given period and fill the parts that will be empty due to
+        this operation with nulls.
 
         Parameters
         ----------
@@ -4964,12 +5305,14 @@ class ListNameSpace:
         Parameters
         ----------
         expr
-            Expression to run. Note that you can select an element with `pl.first()`, or `pl.col()`
+            Expression to run. Note that you can select an element with `pl.first()`, or
+            `pl.col()`
         parallel
             Run all expression parallel. Don't activate this blindly.
             Parallelism is worth it if there is enough work to do per thread.
 
-            This likely should not be use in the groupby context, because we already parallel execution per group
+            This likely should not be use in the groupby context, because we already
+            parallel execution per group
 
         Examples
         --------
@@ -4995,9 +5338,7 @@ class ListNameSpace:
 
 
 class DateTimeNameSpace:
-    """
-    Series.dt namespace.
-    """
+    """Series.dt namespace."""
 
     def __init__(self, series: Series):
         self._s = series._s
@@ -5009,7 +5350,8 @@ class DateTimeNameSpace:
     ) -> Series:
         """
         .. warning::
-            This API is experimental and may change without it being considered a breaking change.
+            This API is experimental and may change without it being considered a
+            breaking change.
 
         Divide the date/ datetime range into buckets.
 
@@ -5119,11 +5461,15 @@ class DateTimeNameSpace:
 
     def strftime(self, fmt: str) -> Series:
         """
-        Format Date/datetime with a formatting rule: See `chrono strftime/strptime <https://docs.rs/chrono/0.4.19/chrono/format/strftime/index.html>`_.
+        Format Date/datetime with a formatting rule:
+
+        See `chrono strftime/strptime
+        <https://docs.rs/chrono/0.4.19/chrono/format/strftime/index.html>`_.
 
         Returns
         -------
         Utf8 Series
+
         """
         return wrap_s(self._s.strftime(fmt))
 
@@ -5137,6 +5483,7 @@ class DateTimeNameSpace:
         Returns
         -------
         Year as Int32
+
         """
         return wrap_s(self._s.year())
 
@@ -5150,6 +5497,7 @@ class DateTimeNameSpace:
         Returns
         -------
         Quarter as UInt32
+
         """
         return pli.select(pli.lit(wrap_s(self._s)).dt.quarter()).to_series()
 
@@ -5164,6 +5512,7 @@ class DateTimeNameSpace:
         Returns
         -------
         Month as UInt32
+
         """
         return wrap_s(self._s.month())
 
@@ -5178,6 +5527,7 @@ class DateTimeNameSpace:
         Returns
         -------
         Week number as UInt32
+
         """
         return wrap_s(self._s.week())
 
@@ -5191,6 +5541,7 @@ class DateTimeNameSpace:
         Returns
         -------
         Week day as UInt32
+
         """
         return wrap_s(self._s.weekday())
 
@@ -5205,6 +5556,7 @@ class DateTimeNameSpace:
         Returns
         -------
         Day as UInt32
+
         """
         return wrap_s(self._s.day())
 
@@ -5219,6 +5571,7 @@ class DateTimeNameSpace:
         Returns
         -------
         Day as UInt32
+
         """
         return wrap_s(self._s.ordinal_day())
 
@@ -5232,6 +5585,7 @@ class DateTimeNameSpace:
         Returns
         -------
         Hour as UInt32
+
         """
         return wrap_s(self._s.hour())
 
@@ -5245,6 +5599,7 @@ class DateTimeNameSpace:
         Returns
         -------
         Minute as UInt32
+
         """
         return wrap_s(self._s.minute())
 
@@ -5258,6 +5613,7 @@ class DateTimeNameSpace:
         Returns
         -------
         Second as UInt32
+
         """
         return wrap_s(self._s.second())
 
@@ -5272,6 +5628,7 @@ class DateTimeNameSpace:
         Returns
         -------
         Nanosecond as UInt32
+
         """
         return wrap_s(self._s.nanosecond())
 
@@ -5283,6 +5640,7 @@ class DateTimeNameSpace:
         ----------
         tu
             One of {'ns', 'us', 'ms'}
+
         """
         return wrap_s(self._s.timestamp(tu))
 
@@ -5299,30 +5657,22 @@ class DateTimeNameSpace:
         )
 
     def min(self) -> date | datetime | timedelta:
-        """
-        Return minimum as python DateTime
-        """
+        """Return minimum as python DateTime."""
         # we can ignore types because we are certain we get a logical type
-        return wrap_s(self._s).min()  # type: ignore
+        return wrap_s(self._s).min()  # type: ignore[return-value]
 
     def max(self) -> date | datetime | timedelta:
-        """
-        Return maximum as python DateTime
-        """
-        return wrap_s(self._s).max()  # type: ignore
+        """Return maximum as python DateTime."""
+        return wrap_s(self._s).max()  # type: ignore[return-value]
 
     def median(self) -> date | datetime | timedelta:
-        """
-        Return median as python DateTime
-        """
+        """Return median as python DateTime."""
         s = wrap_s(self._s)
         out = int(s.median())
         return _to_python_datetime(out, s.dtype, s.time_unit)
 
     def mean(self) -> date | datetime:
-        """
-        Return mean as python DateTime
-        """
+        """Return mean as python DateTime."""
         s = wrap_s(self._s)
         out = int(s.mean())
         return _to_python_datetime(out, s.dtype, s.time_unit)
@@ -5335,6 +5685,7 @@ class DateTimeNameSpace:
         ----------
         tu
             One of {'ns', 'us', 'ms', 's', 'd'}
+
         """
         if tu in DTYPE_TEMPORAL_UNITS:
             return self.timestamp(tu)
@@ -5356,13 +5707,16 @@ class DateTimeNameSpace:
         Returns
         -------
         Days as Int32
+
         """
         return wrap_s(self._s).cast(Date).cast(Int32)
 
     def epoch_milliseconds(self) -> Series:
         """
-        Get the number of milliseconds since the unix EPOCH
-        If the date is before the unix EPOCH, the number of milliseconds will be negative.
+        Get the number of milliseconds since the unix EPOCH.
+
+        If the date is before the unix EPOCH, the number of milliseconds will be
+        negative.
 
         .. deprecated:: 0.13.9
             Use :func:`epoch` instead.
@@ -5370,6 +5724,7 @@ class DateTimeNameSpace:
         Returns
         -------
         Milliseconds as Int64
+
         """
         return self.timestamp("ms")
 
@@ -5384,18 +5739,20 @@ class DateTimeNameSpace:
         Returns
         -------
         Milliseconds as Int64
+
         """
         return wrap_s(self._s.dt_epoch_seconds())
 
     def with_time_unit(self, tu: str) -> Series:
         """
-        Set time unit a Series of dtype Datetime or Duration. This does not modify underlying data,
-        and should be used to fix an incorrect time unit.
+        Set time unit a Series of dtype Datetime or Duration. This does not modify
+        underlying data, and should be used to fix an incorrect time unit.
 
         Parameters
         ----------
         tu
             Time unit for the `Datetime` Series: any of {"ns", "us", "ms"}
+
         """
         return pli.select(pli.lit(wrap_s(self._s)).dt.with_time_unit(tu)).to_series()
 
@@ -5407,6 +5764,7 @@ class DateTimeNameSpace:
         ----------
         tu
             Time unit for the `Datetime` Series: any of {"ns", "us", "ms"}
+
         """
         return pli.select(pli.lit(wrap_s(self._s)).dt.cast_time_unit(tu)).to_series()
 
@@ -5421,6 +5779,7 @@ class DateTimeNameSpace:
         ----------
         tu
             Time unit for the `Datetime` Series: any of {"ns", "us", "ms"}
+
         """
         return self.with_time_unit(tu)
 
@@ -5458,6 +5817,7 @@ class DateTimeNameSpace:
         Returns
         -------
         A series of dtype Int64
+
         """
         return pli.select(pli.lit(wrap_s(self._s)).dt.days()).to_series()
 
@@ -5468,6 +5828,7 @@ class DateTimeNameSpace:
         Returns
         -------
         A series of dtype Int64
+
         """
         return pli.select(pli.lit(wrap_s(self._s)).dt.hours()).to_series()
 
@@ -5478,6 +5839,7 @@ class DateTimeNameSpace:
         Returns
         -------
         A series of dtype Int64
+
         """
         return pli.select(pli.lit(wrap_s(self._s)).dt.minutes()).to_series()
 
@@ -5488,6 +5850,7 @@ class DateTimeNameSpace:
         Returns
         -------
         A series of dtype Int64
+
         """
         return pli.select(pli.lit(wrap_s(self._s)).dt.seconds()).to_series()
 
@@ -5498,6 +5861,7 @@ class DateTimeNameSpace:
         Returns
         -------
         A series of dtype Int64
+
         """
         return pli.select(pli.lit(wrap_s(self._s)).dt.milliseconds()).to_series()
 
@@ -5508,6 +5872,7 @@ class DateTimeNameSpace:
         Returns
         -------
         A series of dtype Int64
+
         """
         return pli.select(pli.lit(wrap_s(self._s)).dt.nanoseconds()).to_series()
 
@@ -5538,14 +5903,13 @@ class DateTimeNameSpace:
         Returns
         -------
         Date/Datetime expression
+
         """
         return pli.select(pli.lit(wrap_s(self._s)).dt.offset_by(by)).to_series()
 
 
 class CatNameSpace:
-    """
-    Namespace for categorical related series.
-    """
+    """Namespace for categorical related series."""
 
     def __init__(self, s: Series):
         self._s = s
@@ -5558,7 +5922,8 @@ class CatNameSpace:
         ----------
         ordering
             One of:
-                - 'physical' -> use the physical representation of the categories to determine the order (default)
+                - 'physical' -> use the physical representation of the categories to
+                    determine the order (default)
                 - 'lexical' -. use the string values to determine the ordering
 
         Examples
@@ -5587,14 +5952,13 @@ class CatNameSpace:
         ├╌╌╌╌╌╌┼╌╌╌╌╌╌┤
         │ z    ┆ 3    │
         └──────┴──────┘
+
         """
         return pli.select(pli.lit(self._s).cat.set_ordering(ordering)).to_series()
 
 
 class SeriesIter:
-    """
-    Utility class that allows slow iteration over a `Series`.
-    """
+    """Utility class that allows slow iteration over a `Series`."""
 
     def __init__(self, length: int, s: Series):
         self.len = length

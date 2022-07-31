@@ -32,6 +32,7 @@ except ImportError:
     HYPOTHESIS_INSTALLED = False
 
 
+import polars.internals as pli
 from polars.datatypes import (
     Boolean,
     Categorical,
@@ -55,7 +56,6 @@ from polars.datatypes import (
     is_polars_dtype,
     py_type_to_dtype,
 )
-from polars.internals import DataFrame, LazyFrame, Series, col, lit
 
 if HYPOTHESIS_INSTALLED:
     # TODO: increase the number of iterations during CI checkins?
@@ -73,8 +73,8 @@ MAX_COLS = 8
 
 
 def assert_frame_equal(
-    left: DataFrame | LazyFrame,
-    right: DataFrame | LazyFrame,
+    left: pli.DataFrame | pli.LazyFrame,
+    right: pli.DataFrame | pli.LazyFrame,
     check_dtype: bool = True,
     check_exact: bool = False,
     check_column_names: bool = True,
@@ -94,7 +94,8 @@ def assert_frame_equal(
     check_dtype
         if True, data types need to match exactly.
     check_exact
-        if False, test if values are within tolerance of each other (see `rtol` & `atol`).
+        if False, test if values are within tolerance of each other
+        (see `rtol` & `atol`).
     check_column_names
         if True, dataframes must have the same column names in the same order.
     rtol
@@ -109,15 +110,15 @@ def assert_frame_equal(
     >>> df1 = pl.DataFrame({"a": [1, 2, 3]})
     >>> df2 = pl.DataFrame({"a": [2, 3, 4]})
     >>> pl.testing.assert_frame_equal(df1, df2)  # doctest: +SKIP
+
     """
-
-    if isinstance(left, LazyFrame) and isinstance(right, LazyFrame):
+    if isinstance(left, pli.LazyFrame) and isinstance(right, pli.LazyFrame):
         left, right = left.collect(), right.collect()
-        obj = "LazyFrame"
+        obj = "pli.LazyFrame"
     else:
-        obj = "DataFrame"
+        obj = "pli.DataFrame"
 
-    if not (isinstance(left, DataFrame) and isinstance(right, DataFrame)):
+    if not (isinstance(left, pli.DataFrame) and isinstance(right, pli.DataFrame)):
         raise_assert_detail(obj, "Type mismatch", type(left), type(right))
     elif left.shape[0] != right.shape[0]:
         raise_assert_detail(obj, "Length mismatch", left.shape, right.shape)
@@ -137,8 +138,8 @@ def assert_frame_equal(
     # this does not assume a particular order
     for c in left.columns:
         _assert_series_inner(
-            left[c],  # type: ignore
-            right[c],  # type: ignore
+            left[c],  # type: ignore[arg-type, index]
+            right[c],  # type: ignore[arg-type, index]
             check_dtype,
             check_exact,
             nans_compare_equal,
@@ -149,8 +150,8 @@ def assert_frame_equal(
 
 
 def assert_series_equal(
-    left: Series,
-    right: Series,
+    left: pli.Series,
+    right: pli.Series,
     check_dtype: bool = True,
     check_names: bool = True,
     check_exact: bool = False,
@@ -172,7 +173,8 @@ def assert_series_equal(
     check_names
         if True, names need to match.
     check_exact
-        if False, test if values are within tolerance of each other (see `rtol` & `atol`).
+        if False, test if values are within tolerance of each other
+        (see `rtol` & `atol`).
     rtol
         relative tolerance for inexact checking. Fraction of values in `right`.
     atol
@@ -185,10 +187,14 @@ def assert_series_equal(
     >>> s1 = pl.Series([1, 2, 3])
     >>> s2 = pl.Series([2, 3, 4])
     >>> pl.testing.assert_series_equal(s1, s2)  # doctest: +SKIP
+
     """
     obj = "Series"
 
-    if not (isinstance(left, Series) and isinstance(right, Series)):
+    if not (
+        isinstance(left, pli.Series)  # type: ignore[redundant-expr]
+        and isinstance(right, pli.Series)
+    ):
         raise_assert_detail(obj, "Type mismatch", type(left), type(right))
 
     if left.shape != right.shape:
@@ -204,8 +210,8 @@ def assert_series_equal(
 
 
 def _assert_series_inner(
-    left: Series,
-    right: Series,
+    left: pli.Series,
+    right: pli.Series,
     check_dtype: bool,
     check_exact: bool,
     nans_compare_equal: bool,
@@ -213,9 +219,7 @@ def _assert_series_inner(
     rtol: float,
     obj: str,
 ) -> None:
-    """
-    Compares Series dtype + values
-    """
+    """Compare Series dtype + values."""
     try:
         can_be_subtracted = hasattr(dtype_to_py_type(left.dtype), "__sub__")
     except NotImplementedError:
@@ -230,7 +234,9 @@ def _assert_series_inner(
     unequal = left != right
     if unequal.any() and nans_compare_equal and left.dtype in (Float32, Float64):
         # handle NaN values (which compare unequal to themselves)
-        unequal = unequal & ~((left.is_nan() & right.is_nan()).fill_null(lit(False)))
+        unequal = unequal & ~(
+            (left.is_nan() & right.is_nan()).fill_null(pli.lit(False))
+        )
 
     # assert exact, or with tolerance
     if unequal.any():
@@ -268,27 +274,33 @@ def raise_assert_detail(
 
 def _getattr_multi(obj: object, op: str) -> Any:
     """
-    Allows `op` to be multiple layers deep, i.e. op="str.lengths" will mean we first
-    get the attribute "str", and then the attribute "lengths"
+    Allow `op` to be multiple layers deep.
+
+    For example, op="str.lengths" will mean we first get the attribute "str", and then
+    the attribute "lengths".
+
     """
     op_list = op.split(".")
     return reduce(lambda o, m: getattr(o, m), op_list, obj)
 
 
 def verify_series_and_expr_api(
-    input: Series, expected: Series | None, op: str, *args: Any, **kwargs: Any
+    input: pli.Series, expected: pli.Series | None, op: str, *args: Any, **kwargs: Any
 ) -> None:
     """
-    Small helper function to test element-wise functions for both the series and expressions api.
+    Test element-wise functions for both the series and expressions API.
 
     Examples
     --------
     >>> s = pl.Series([1, 3, 2])
     >>> expected = pl.Series([1, 2, 3])
     >>> verify_series_and_expr_api(s, expected, "sort")
+
     """
-    expr = _getattr_multi(col("*"), op)(*args, **kwargs)
-    result_expr: Series = input.to_frame().select(expr)[:, 0]  # type: ignore[assignment]
+    expr = _getattr_multi(pli.col("*"), op)(*args, **kwargs)
+    result_expr: pli.Series = input.to_frame().select(expr)[  # type: ignore[assignment]
+        :, 0
+    ]
     result_series = _getattr_multi(input, op)(*args, **kwargs)
     if expected is None:
         assert_series_equal(result_series, result_expr)
@@ -298,9 +310,7 @@ def verify_series_and_expr_api(
 
 
 def is_categorical_dtype(data_type: Any) -> bool:
-    """
-    Check if the input is a polars Categorical dtype.
-    """
+    """Check if the input is a polars Categorical dtype."""
     return (
         type(data_type) is type
         and issubclass(data_type, Categorical)
@@ -326,10 +336,12 @@ if HYPOTHESIS_INSTALLED:
         UInt16: integers(min_value=0, max_value=(2**16) - 1),
         UInt32: integers(min_value=0, max_value=(2**32) - 1),
         UInt64: integers(min_value=0, max_value=(2**64) - 1),
-        # TODO: when generating text for categorical, ensure there are repeats - don't want all to be unique.
+        # TODO: when generating text for categorical, ensure there are repeats -
+        # don't want all to be unique.
         Categorical: text(),
         Utf8: text(),
-        # TODO: generate arrow temporal types with different resolution (32/64) to validate compatibility.
+        # TODO: generate arrow temporal types with different resolution (32/64) to
+        # validate compatibility.
         Time: times(),
         Date: dates(),
         Duration: timedeltas(),
@@ -351,16 +363,14 @@ if HYPOTHESIS_INSTALLED:
     strategy_dtypes = list(dtype_strategy_mapping)
 
     def between(draw: Callable, type_: type, min_: Any, max_: Any) -> Any:
-        """
-        Draw a value in a given range from a type-inferred strategy.
-        """
-        strategy_init = getattr(from_type(type_), "function")
+        """Draw a value in a given range from a type-inferred strategy."""
+        strategy_init = from_type(type_).function  # type: ignore[attr-defined]
         return draw(strategy_init(min_, max_))
 
     @dataclass
     class column:
         """
-        Define a column for use with `dataframes` strategy.
+        Define a column for use with the @dataframes strategy.
 
         Parameters
         ----------
@@ -380,11 +390,12 @@ if HYPOTHESIS_INSTALLED:
         Examples
         --------
         >>> from hypothesis.strategies import sampled_from
-        >>> from polars.testing import column
-        >>>
-        >>> column(name="unique_small_ints", dtype=pl.UInt8, unique=True)
-        >>> column(name="ccy", strategy=sampled_from(["GBP", "EUR", "JPY"]))
-        """
+        >>> pl.testing.column(name="unique_small_ints", dtype=pl.UInt8, unique=True)
+        column(name='unique_small_ints', dtype=<class 'polars.datatypes.UInt8'>, strategy=None, null_probability=None, unique=True)
+        >>> pl.testing.column(name="ccy", strategy=sampled_from(["GBP", "EUR", "JPY"]))
+        column(name='ccy', dtype=<class 'polars.datatypes.Utf8'>, strategy=sampled_from(['GBP', 'EUR', 'JPY']), null_probability=None, unique=False)
+
+        """  # noqa: E501
 
         name: str
         dtype: PolarsDataType | None = None
@@ -397,7 +408,8 @@ if HYPOTHESIS_INSTALLED:
                 self.null_probability < 0 or self.null_probability > 1
             ):
                 raise InvalidArgument(
-                    f"null_probability should be between 0.0 and 1.0, or None; found {self.null_probability}"
+                    "null_probability should be between 0.0 and 1.0, or None; found"
+                    f" {self.null_probability}"
                 )
             if self.dtype is None and not self.strategy:
                 self.dtype = random.choice(strategy_dtypes)
@@ -410,10 +422,14 @@ if HYPOTHESIS_INSTALLED:
                     # given a custom strategy, but no explicit dtype. infer one
                     # from the first non-None value that the strategy produces.
                     with warnings.catch_warnings():
-                        # note: usually you should not call "example()" outside of an interactive shell, hence
-                        # the warning. however, here it is reasonable to do so, so we catch and ignore it
+                        # note: usually you should not call "example()" outside of an
+                        # interactive shell, hence the warning. however, here it is
+                        # reasonable to do so, so we catch and ignore it
                         warnings.simplefilter("ignore", NonInteractiveExampleWarning)
-                        sample_value_iter = (self.strategy.example() for _ in range(100))  # type: ignore[union-attr]
+                        sample_value_iter = (
+                            self.strategy.example()  # type: ignore[union-attr]
+                            for _ in range(100)
+                        )
                         sample_value_type = type(
                             next(e for e in sample_value_iter if e is not None)
                         )
@@ -433,8 +449,11 @@ if HYPOTHESIS_INSTALLED:
         unique: bool = False,
     ) -> list[column]:
         """
-        Generate a fixed sequence of `column` objects suitable for passing to the @dataframes
-        strategy, or using standalone (note that this function is not itself a strategy).
+        Define multiple columns for use with the @dataframes strategy.
+
+        Generate a fixed sequence of `column` objects suitable for passing to the
+        @dataframes strategy, or using standalone (note that this function is not itself
+        a strategy).
 
         Notes
         -----
@@ -445,17 +464,20 @@ if HYPOTHESIS_INSTALLED:
         Parameters
         ----------
         cols : {int, [str]}, optional
-            integer number of cols to create, or explicit list of column names. if omitted
-            a random number of columns (between mincol and max_cols) are created.
+            integer number of cols to create, or explicit list of column names. if
+            omitted a random number of columns (between mincol and max_cols) are
+            created.
         dtype : dtype, optional
             a single dtype for all cols, or list of dtypes (the same length as `cols`).
             if omitted, each generated column is assigned a random dtype.
         min_cols : int, optional
             if not passing an exact size, can set a minimum here (defaults to 0).
         max_cols : int, optional
-            if not passing an exact size, can set a maximum value here (defaults to MAX_COLS).
+            if not passing an exact size, can set a maximum value here (defaults to
+            MAX_COLS).
         unique : bool, optional
-            indicate if the values generated for these columns should be unique (per-column).
+            indicate if the values generated for these columns should be unique
+            (per-column).
 
         Examples
         --------
@@ -474,6 +496,7 @@ if HYPOTHESIS_INSTALLED:
         >>> @given(dataframes(columns(["x", "y", "z"], unique=True)))
         ... def test_unique_xyz(df: pl.DataFrame) -> None:
         ...     assert_something(df)
+
         """
         # create/assign named columns
         if cols is None:
@@ -519,29 +542,33 @@ if HYPOTHESIS_INSTALLED:
         unique: bool = False,
         allowed_dtypes: Sequence[PolarsDataType] | None = None,
         excluded_dtypes: Sequence[PolarsDataType] | None = None,
-    ) -> SearchStrategy[Series]:
+    ) -> SearchStrategy[pli.Series]:
         """
         Strategy for producing a polars Series.
 
         Parameters
         ----------
         name : {str, strategy}, optional
-            literal string or a strategy for strings (or None), passed to the Series constructor name-param.
+            literal string or a strategy for strings (or None), passed to the Series
+            constructor name-param.
         dtype : dtype, optional
             a valid polars DataType for the resulting series.
         size : int, optional
-            if set, will create a Series of exactly this size (and ignore min/max len params).
+            if set, will create a Series of exactly this size (and ignore min/max len
+            params).
         min_size : int, optional
             if not passing an exact size, can set a minimum here (defaults to 0).
             no-op if `size` is set.
         max_size : int, optional
-            if not passing an exact size, can set a maximum value here (defaults to MAX_DATA_SIZE).
+            if not passing an exact size, can set a maximum value here (defaults to
+            MAX_DATA_SIZE).
             no-op if `size` is set.
         strategy : strategy, optional
             supports overriding the default strategy for the given dtype.
         null_probability : float, optional
-            percentage chance (expressed between 0.0 => 1.0) that a generated value is None. this
-            is applied independently of any None values generated by the underlying strategy.
+            percentage chance (expressed between 0.0 => 1.0) that a generated value is
+            None. this is applied independently of any None values generated by the
+            underlying strategy.
         unique : bool, optional
             indicate whether Series values should all be distinct.
         allowed_dtypes : {list,set}, optional
@@ -551,10 +578,11 @@ if HYPOTHESIS_INSTALLED:
 
         Notes
         -----
-        In actual usage this is deployed as a unit test decorator, providing a strategy that
-        generates multiple Series with the given dtype/size characteristics for the unit test.
-        While developing a strategy/test, it can also be useful to call `.example()` directly
-        on a given strategy to see concrete instances of the generated data.
+        In actual usage this is deployed as a unit test decorator, providing a strategy
+        that generates multiple Series with the given dtype/size characteristics for the
+        unit test. While developing a strategy/test, it can also be useful to call
+        `.example()` directly on a given strategy to see concrete instances of the
+        generated data.
 
         Examples
         --------
@@ -576,7 +604,7 @@ if HYPOTHESIS_INSTALLED:
             6414
             -63290
         ]
-        >>>
+
         """
         selectable_dtypes = [
             dtype
@@ -585,12 +613,13 @@ if HYPOTHESIS_INSTALLED:
         ]
         if null_probability and (null_probability < 0 or null_probability > 1):
             raise InvalidArgument(
-                f"null_probability should be between 0.0 and 1.0; found {null_probability}"
+                "null_probability should be between 0.0 and 1.0; found"
+                f" {null_probability}"
             )
         null_probability = float(null_probability or 0.0)
 
         @composite
-        def draw_series(draw: Callable) -> Series:
+        def draw_series(draw: Callable) -> pli.Series:
             # create/assign series dtype and retrieve matching strategy
             series_dtype = (
                 draw(sampled_from(selectable_dtypes)) if dtype is None else dtype
@@ -633,7 +662,7 @@ if HYPOTHESIS_INSTALLED:
                         series_values[idx] = None
 
             # init series with strategy-generated data
-            s = Series(
+            s = pli.Series(
                 name=series_name,
                 dtype=series_dtype,
                 values=series_values,
@@ -658,7 +687,7 @@ if HYPOTHESIS_INSTALLED:
         null_probability: float | dict[str, float] = 0.0,
         allowed_dtypes: Sequence[PolarsDataType] | None = None,
         excluded_dtypes: Sequence[PolarsDataType] | None = None,
-    ) -> SearchStrategy[DataFrame | LazyFrame]:
+    ) -> SearchStrategy[pli.DataFrame | pli.LazyFrame]:
         """
         Provides a strategy for producing a DataFrame or LazyFrame.
 
@@ -672,21 +701,27 @@ if HYPOTHESIS_INSTALLED:
         min_cols : int, optional
             if not passing an exact size, can set a minimum here (defaults to 0).
         max_cols : int, optional
-            if not passing an exact size, can set a maximum value here (defaults to MAX_COLS).
+            if not passing an exact size, can set a maximum value here (defaults to
+            MAX_COLS).
         size : int, optional
-            if set, will create a DataFrame of exactly this size (and ignore min/max len params).
+            if set, will create a DataFrame of exactly this size (and ignore min/max len
+            params).
         min_size : int, optional
-            if not passing an exact size, set the minimum number of rows in the DataFrame.
+            if not passing an exact size, set the minimum number of rows in the
+            DataFrame.
         max_size : int, optional
-            if not passing an exact size, set the maximum number of rows in the DataFrame.
+            if not passing an exact size, set the maximum number of rows in the
+            DataFrame.
         include_cols : [column], optional
-            a list of `column` objects to include in the generated DataFrame. note that explicitly
-            provided columns are appended onto the list of existing columns (if any present).
+            a list of `column` objects to include in the generated DataFrame. note that
+            explicitly provided columns are appended onto the list of existing columns
+            (if any present).
         null_probability : {float, dict[str,float]}, optional
-            percentage chance (expressed between 0.0 => 1.0) that a generated value is None. this is
-            applied independently of any None values generated by the underlying strategy, and can
-            be applied either on a per-column basis (if given as a {col:pct} dict), or globally. if
-            null_probability is defined on a column, it takes precedence over the global value.
+            percentage chance (expressed between 0.0 => 1.0) that a generated value is
+            None. this is applied independently of any None values generated by the
+            underlying strategy, and can be applied either on a per-column basis (if
+            given as a {col:pct} dict), or globally. if null_probability is defined on a
+            column, it takes precedence over the global value.
         allowed_dtypes : {list,set}, optional
             when automatically generating data, allow only these dtypes.
         excluded_dtypes : {list,set}, optional
@@ -694,15 +729,17 @@ if HYPOTHESIS_INSTALLED:
 
         Notes
         -----
-        In actual usage this is deployed as a unit test decorator, providing a strategy that
-        generates DataFrames or LazyFrames with the given schema/size characteristics for the
-        unit test. While developing a strategy/test, it can also be useful to call `.example()`
-        directly on a given strategy to see concrete instances of the generated data.
+        In actual usage this is deployed as a unit test decorator, providing a strategy
+        that generates DataFrames or LazyFrames with the given schema/size
+        characteristics for the unit test. While developing a strategy/test, it can also
+        be useful to call `.example()` directly on a given strategy to see concrete
+        instances of the generated data.
 
         Examples
         --------
-        Use `column` or `columns` to specify the schema of the types of DataFrame to generate.
-        Note: in actual use the strategy is applied as a test decorator, not used standalone.
+        Use `column` or `columns` to specify the schema of the types of DataFrame to
+        generate. Note: in actual use the strategy is applied as a test decorator, not
+        used standalone.
 
         >>> from polars.testing import column, columns, dataframes
         >>> from hypothesis import given
@@ -740,7 +777,7 @@ if HYPOTHESIS_INSTALLED:
         ├╌╌╌╌╌╌╌╌╌╌╌┼╌╌╌╌╌╌╌╌╌╌╌╌┤
         │ 575050513 ┆ NaN        │
         └───────────┴────────────┘
-        """
+        """  # noqa: 501
         if isinstance(cols, int):
             cols = columns(cols)
 
@@ -751,7 +788,7 @@ if HYPOTHESIS_INSTALLED:
         ]
 
         @composite
-        def draw_frames(draw: Callable) -> DataFrame | LazyFrame:
+        def draw_frames(draw: Callable) -> pli.DataFrame | pli.LazyFrame:
             # if not given, create 'n' cols with random dtypes
             if cols is None:
                 n = between(
@@ -789,7 +826,7 @@ if HYPOTHESIS_INSTALLED:
             frame_columns = [
                 c.name if (c.dtype is None) else (c.name, c.dtype) for c in coldefs
             ]
-            df = DataFrame(
+            df = pli.DataFrame(
                 data={
                     c.name: draw(
                         series(
@@ -809,3 +846,13 @@ if HYPOTHESIS_INSTALLED:
             return df.lazy() if lazy else df
 
         return draw_frames()
+
+
+def assert_frame_equal_local_categoricals(
+    df_a: pli.DataFrame, df_b: pli.DataFrame
+) -> None:
+    assert df_a.schema == df_b.schema
+    cat_to_str = pli.col(Categorical).cast(str)
+    assert df_a.with_column(cat_to_str).frame_equal(df_b.with_column(cat_to_str))
+    cat_to_phys = pli.col(Categorical).to_physical()
+    assert df_a.with_column(cat_to_phys).frame_equal(df_b.with_column(cat_to_phys))

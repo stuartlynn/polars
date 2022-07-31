@@ -8,6 +8,7 @@ use crate::utils::{aexprs_to_schema, PushNode};
 use polars_core::frame::explode::MeltArgs;
 use polars_core::prelude::*;
 use polars_utils::arena::{Arena, Node};
+use std::borrow::Cow;
 #[cfg(any(feature = "ipc", feature = "csv-file", feature = "parquet"))]
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -132,7 +133,7 @@ pub enum ALogicalPlan {
         input: Node,
         function: Arc<dyn DataFrameUdf>,
         options: LogicalPlanUdfOptions,
-        schema: Option<SchemaRef>,
+        schema: Option<Arc<dyn UdfSchema>>,
     },
     Union {
         inputs: Vec<Node>,
@@ -152,14 +153,33 @@ impl Default for ALogicalPlan {
 }
 
 impl ALogicalPlan {
-    pub(crate) fn schema<'a>(&'a self, arena: &'a Arena<ALogicalPlan>) -> &'a SchemaRef {
+    /// Get the schema of the logical plan node but don't take projections into account at the scan
+    /// level. This ensures we can apply the predicate
+    pub(crate) fn scan_schema(&self) -> &SchemaRef {
         use ALogicalPlan::*;
         match self {
             #[cfg(feature = "python")]
             PythonScan { options } => &options.schema,
-            Union { inputs, .. } => arena.get(inputs[0]).schema(arena),
-            Cache { input } => arena.get(*input).schema(arena),
-            Sort { input, .. } => arena.get(*input).schema(arena),
+            #[cfg(feature = "csv-file")]
+            CsvScan { schema, .. } => schema,
+            #[cfg(feature = "parquet")]
+            ParquetScan { schema, .. } => schema,
+            #[cfg(feature = "ipc")]
+            IpcScan { schema, .. } => schema,
+            AnonymousScan { schema, .. } => schema,
+            _ => unreachable!(),
+        }
+    }
+
+    /// Get the schema of the logical plan node.
+    pub(crate) fn schema<'a>(&'a self, arena: &'a Arena<ALogicalPlan>) -> Cow<'a, SchemaRef> {
+        use ALogicalPlan::*;
+        let schema = match self {
+            #[cfg(feature = "python")]
+            PythonScan { options } => &options.schema,
+            Union { inputs, .. } => return arena.get(inputs[0]).schema(arena),
+            Cache { input } => return arena.get(*input).schema(arena),
+            Sort { input, .. } => return arena.get(*input).schema(arena),
             Explode { schema, .. } => schema,
             #[cfg(feature = "parquet")]
             ParquetScan {
@@ -179,7 +199,7 @@ impl ALogicalPlan {
                 output_schema,
                 ..
             } => output_schema.as_ref().unwrap_or(schema),
-            Selection { input, .. } => arena.get(*input).schema(arena),
+            Selection { input, .. } => return arena.get(*input).schema(arena),
             #[cfg(feature = "csv-file")]
             CsvScan {
                 schema,
@@ -191,14 +211,18 @@ impl ALogicalPlan {
             Aggregate { schema, .. } => schema,
             Join { schema, .. } => schema,
             HStack { schema, .. } => schema,
-            Distinct { input, .. } => arena.get(*input).schema(arena),
-            Slice { input, .. } => arena.get(*input).schema(arena),
+            Distinct { input, .. } => return arena.get(*input).schema(arena),
+            Slice { input, .. } => return arena.get(*input).schema(arena),
             Melt { schema, .. } => schema,
-            Udf { input, schema, .. } => match schema {
-                Some(schema) => schema,
-                None => arena.get(*input).schema(arena),
-            },
-        }
+            Udf { input, schema, .. } => {
+                let input_schema = arena.get(*input).schema(arena);
+                return match schema {
+                    Some(schema) => Cow::Owned(schema.get_schema(&input_schema).unwrap()),
+                    None => input_schema,
+                };
+            }
+        };
+        Cow::Borrowed(schema)
     }
 }
 
@@ -493,7 +517,16 @@ impl ALogicalPlan {
             }
             #[cfg(feature = "python")]
             PythonScan { .. } => {}
-            AnonymousScan { .. } => {}
+            AnonymousScan {
+                predicate,
+                aggregate,
+                ..
+            } => {
+                container.extend_from_slice(aggregate);
+                if let Some(node) = predicate {
+                    container.push(*node)
+                }
+            }
         }
     }
 
@@ -594,7 +627,7 @@ impl<'a> ALogicalPlanBuilder<'a> {
     }
 
     pub fn melt(self, args: Arc<MeltArgs>) -> Self {
-        let schema = det_melt_schema(&args, self.schema());
+        let schema = det_melt_schema(&args, &self.schema());
 
         let lp = ALogicalPlan::Melt {
             input: self.root,
@@ -607,7 +640,7 @@ impl<'a> ALogicalPlanBuilder<'a> {
 
     pub fn project_local(self, exprs: Vec<Node>) -> Self {
         let input_schema = self.lp_arena.get(self.root).schema(self.lp_arena);
-        let schema = aexprs_to_schema(&exprs, input_schema, Context::Default, self.expr_arena);
+        let schema = aexprs_to_schema(&exprs, &input_schema, Context::Default, self.expr_arena);
         let lp = ALogicalPlan::LocalProjection {
             expr: exprs,
             input: self.root,
@@ -619,7 +652,7 @@ impl<'a> ALogicalPlanBuilder<'a> {
 
     pub fn project(self, exprs: Vec<Node>) -> Self {
         let input_schema = self.lp_arena.get(self.root).schema(self.lp_arena);
-        let schema = aexprs_to_schema(&exprs, input_schema, Context::Default, self.expr_arena);
+        let schema = aexprs_to_schema(&exprs, &input_schema, Context::Default, self.expr_arena);
 
         // if len == 0, no projection has to be done. This is a select all operation.
         if !exprs.is_empty() {
@@ -643,19 +676,19 @@ impl<'a> ALogicalPlanBuilder<'a> {
         }
     }
 
-    pub(crate) fn schema(&self) -> &Schema {
+    pub(crate) fn schema(&'a self) -> Cow<'a, SchemaRef> {
         self.lp_arena.get(self.root).schema(self.lp_arena)
     }
 
     pub(crate) fn with_columns(self, exprs: Vec<Node>) -> Self {
         let schema = self.schema();
-        let mut new_schema = (*schema).clone();
+        let mut new_schema = (**schema).clone();
 
         for e in &exprs {
             let field = self
                 .expr_arena
                 .get(*e)
-                .to_field(schema, Context::Default, self.expr_arena)
+                .to_field(&schema, Context::Default, self.expr_arena)
                 .unwrap();
 
             new_schema.with_column(field.name().clone(), field.data_type().clone());
@@ -682,8 +715,14 @@ impl<'a> ALogicalPlanBuilder<'a> {
         // TODO! add this line if LogicalPlan is dropped in favor of ALogicalPlan
         // let aggs = rewrite_projections(aggs, current_schema);
 
-        let mut schema = aexprs_to_schema(&keys, current_schema, Context::Default, self.expr_arena);
-        let other = aexprs_to_schema(&aggs, current_schema, Context::Aggregation, self.expr_arena);
+        let mut schema =
+            aexprs_to_schema(&keys, &current_schema, Context::Default, self.expr_arena);
+        let other = aexprs_to_schema(
+            &aggs,
+            &current_schema,
+            Context::Aggregation,
+            self.expr_arena,
+        );
         schema.merge(other);
 
         let index_columns = &[

@@ -3,6 +3,7 @@ on:
   pull_request:
     paths:
       - 'nodejs-polars/**'
+      - '.github/workflows/test-js.yaml'
 jobs: 
   test-js: 
     runs-on: ubuntu-latest
@@ -13,7 +14,7 @@ jobs:
     strategy:
       matrix:
         os: ["ubuntu-latest", "macos-latest", "windows-latest"]
-        node: ["16", "17"]
+        node: ["16", "17", "18"]
     steps:
       - uses: actions/checkout@v3
       - uses: actions/setup-node@v2
@@ -24,7 +25,7 @@ jobs:
       - name: Install latest Rust nightly
         uses: actions-rs/toolchain@v1
         with:
-          toolchain: nightly-2022-06-22
+          toolchain: nightly-2022-07-03
           override: true
           components: rustfmt, clippy
       - run: yarn --version

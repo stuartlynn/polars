@@ -1,29 +1,34 @@
 use crate::frame::groupby::hashing::HASHMAP_INIT_SIZE;
 use crate::prelude::*;
-use crate::{datatypes::PlHashMap, use_string_cache, StrHashGlobal};
+use crate::{datatypes::PlHashMap, use_string_cache, StrHashGlobal, StringCache, POOL};
 use ahash::CallHasher;
 use arrow::array::*;
 use hashbrown::hash_map::RawEntryMut;
+use polars_arrow::trusted_len::PushUnchecked;
 use std::hash::{Hash, Hasher};
 
 pub enum RevMappingBuilder {
     /// Hashmap: maps the indexes from the global cache/categorical array to indexes in the local Utf8Array
     /// Utf8Array: caches the string values
-    Global(PlHashMap<u32, u32>, MutableUtf8Array<i64>, u128),
+    GlobalFinished(PlHashMap<u32, u32>, Utf8Array<i64>, u128),
     /// Utf8Array: caches the string values
     Local(MutableUtf8Array<i64>),
 }
 
 impl RevMappingBuilder {
-    fn insert(&mut self, idx: u32, value: &str) {
+    fn insert(&mut self, value: &str) {
         use RevMappingBuilder::*;
         match self {
             Local(builder) => builder.push(Some(value)),
-            Global(map, builder, _) => {
-                if !map.contains_key(&idx) {
-                    builder.push(Some(value));
-                    let new_idx = builder.len() as u32 - 1;
-                    map.insert(idx, new_idx);
+            GlobalFinished(_, _, _) => {
+                #[cfg(debug_assertions)]
+                {
+                    unreachable!()
+                }
+                #[cfg(not(debug_assertions))]
+                {
+                    use std::hint::unreachable_unchecked;
+                    unsafe { unreachable_unchecked() }
                 }
             }
         };
@@ -33,10 +38,7 @@ impl RevMappingBuilder {
         use RevMappingBuilder::*;
         match self {
             Local(b) => RevMapping::Local(b.into()),
-            Global(mut map, b, uuid) => {
-                map.shrink_to_fit();
-                RevMapping::Global(map, b.into(), uuid)
-            }
+            GlobalFinished(map, b, uuid) => RevMapping::Global(map, b, uuid),
         }
     }
 }
@@ -152,7 +154,7 @@ impl<'a> PartialEq for StrHashLocal<'a> {
 }
 
 pub struct CategoricalChunkedBuilder {
-    array_builder: UInt32Vec,
+    cat_builder: UInt32Vec,
     name: String,
     reverse_mapping: RevMappingBuilder,
 }
@@ -160,98 +162,246 @@ pub struct CategoricalChunkedBuilder {
 impl CategoricalChunkedBuilder {
     pub fn new(name: &str, capacity: usize) -> Self {
         let builder = MutableUtf8Array::<i64>::with_capacity(capacity / 10);
-        let reverse_mapping = if use_string_cache() {
-            let uuid = crate::STRING_CACHE.lock_map().uuid;
-            RevMappingBuilder::Global(PlHashMap::default(), builder, uuid)
-        } else {
-            RevMappingBuilder::Local(builder)
-        };
+        let reverse_mapping = RevMappingBuilder::Local(builder);
 
         Self {
-            array_builder: UInt32Vec::with_capacity(capacity),
+            cat_builder: UInt32Vec::with_capacity(capacity),
             name: name.to_string(),
             reverse_mapping,
         }
     }
 }
 impl CategoricalChunkedBuilder {
+    ///
+    /// `store_hashes` is not needed by the local builder, only for the global builder under contention
+    /// The hashes have the same order as the `Utf8Array` values.
+    fn build_local_map<'a, I>(&mut self, i: I, store_hashes: bool) -> Vec<u64>
+    where
+        I: IntoIterator<Item = Option<&'a str>>,
+    {
+        let mut iter = i.into_iter();
+        let mut hashes = if store_hashes {
+            Vec::with_capacity(iter.size_hint().0 / 10)
+        } else {
+            vec![]
+        };
+        // It is important that we use the same hash builder as the global `StringCache` does.
+        let mut mapping =
+            PlHashMap::with_capacity_and_hasher(HASHMAP_INIT_SIZE, StringCache::get_hash_builder());
+        let hb = mapping.hasher().clone();
+        for opt_s in &mut iter {
+            match opt_s {
+                Some(s) => {
+                    let h = str::get_hash(s, &hb);
+                    let key = StrHashLocal::new(s, h);
+                    let mut idx = mapping.len() as u32;
+
+                    let entry = mapping.raw_entry_mut().from_key_hashed_nocheck(h, &key);
+
+                    match entry {
+                        RawEntryMut::Occupied(entry) => idx = *entry.get(),
+                        RawEntryMut::Vacant(entry) => {
+                            if store_hashes {
+                                hashes.push(h)
+                            }
+                            entry.insert_with_hasher(h, key, idx, |s| s.hash);
+                            self.reverse_mapping.insert(s);
+                        }
+                    };
+                    self.cat_builder.push(Some(idx));
+                }
+                None => {
+                    self.cat_builder.push(None);
+                }
+            }
+        }
+
+        if mapping.len() > u32::MAX as usize {
+            panic!("not more than {} categories supported", u32::MAX)
+        };
+        hashes
+    }
+
+    /// Build a global string cached `CategoricalChunked` from a local `Dictionary`.
+    pub(super) fn global_map_from_local(&mut self, keys: &UInt32Array, values: Utf8Array<i64>) {
+        // locally we don't need a hashmap because we all categories are 1 integer apart
+        // so the index is local, and the values is global
+        let mut local_to_global: Vec<u32> = Vec::with_capacity(values.len());
+        let id;
+
+        // now we have to lock the global string cache.
+        // we will create a mapping from our local categoricals to global categoricals
+        // and a mapping from global categoricals to our local categoricals
+
+        // in a separate scope so that we drop the global cache as soon as we are finished
+        {
+            let cache = &mut crate::STRING_CACHE.lock_map();
+            id = cache.uuid;
+            let global_mapping = &mut cache.map;
+            let hb = global_mapping.hasher().clone();
+
+            for s in values.values_iter() {
+                let h = str::get_hash(s, &hb);
+                let mut global_idx = global_mapping.len() as u32;
+                // Note that we don't create the StrHashGlobal to search the key in the hashmap
+                // as StrHashGlobal may allocate a string
+                let entry = global_mapping
+                    .raw_entry_mut()
+                    .from_hash(h, |val| (val.hash == h) && val.str == s);
+
+                match entry {
+                    RawEntryMut::Occupied(entry) => global_idx = *entry.get(),
+                    RawEntryMut::Vacant(entry) => {
+                        // only just now we allocate the string
+                        let key = StrHashGlobal::new(s.into(), h);
+                        entry.insert_with_hasher(h, key, global_idx, |s| s.hash);
+                    }
+                }
+                // safety:
+                // we allocated enough
+                unsafe { local_to_global.push_unchecked(global_idx) }
+            }
+            if global_mapping.len() > u32::MAX as usize {
+                panic!("not more than {} categories supported", u32::MAX)
+            };
+        }
+        // we now know the exact size
+        // no reallocs
+        let mut global_to_local = PlHashMap::with_capacity(local_to_global.len());
+
+        let compute_cats = || {
+            if local_to_global.is_empty() {
+                Default::default()
+            } else {
+                keys.into_iter()
+                    .map(|opt_k| {
+                        opt_k.map(|cat| {
+                            debug_assert!((*cat as usize) < local_to_global.len());
+                            *unsafe { local_to_global.get_unchecked(*cat as usize) }
+                        })
+                    })
+                    .collect::<UInt32Vec>()
+            }
+        };
+
+        let (_, cats) = POOL.join(
+            || fill_global_to_local(&local_to_global, &mut global_to_local),
+            compute_cats,
+        );
+        self.cat_builder = cats;
+
+        self.reverse_mapping = RevMappingBuilder::GlobalFinished(global_to_local, values, id)
+    }
+
+    fn build_global_map_contention<'a, I>(&mut self, i: I)
+    where
+        I: IntoIterator<Item = Option<&'a str>>,
+    {
+        // first build the values: `Utf8Array`
+        // we can use a local hashmap for that
+        // `hashes.len()` is equal to to the number of unique values.
+        let hashes = self.build_local_map(i, true);
+
+        // locally we don't need a hashmap because we all categories are 1 integer apart
+        // so the index is local, and the values is global
+        let mut local_to_global: Vec<u32>;
+        let id;
+
+        // now we have to lock the global string cache.
+        // we will create a mapping from our local categoricals to global categoricals
+        // and a mapping from global categoricals to our local categoricals
+        let values: Utf8Array<_> =
+            if let RevMappingBuilder::Local(values) = &mut self.reverse_mapping {
+                debug_assert_eq!(hashes.len(), values.len());
+                // resize local now that we know the size of the mapping.
+                local_to_global = Vec::with_capacity(values.len());
+                std::mem::take(values).into()
+            } else {
+                unreachable!()
+            };
+
+        // in a separate scope so that we drop the global cache as soon as we are finished
+        {
+            let cache = &mut crate::STRING_CACHE.lock_map();
+            id = cache.uuid;
+            let global_mapping = &mut cache.map;
+
+            for (s, h) in values.values_iter().zip(hashes.into_iter()) {
+                let mut global_idx = global_mapping.len() as u32;
+                // Note that we don't create the StrHashGlobal to search the key in the hashmap
+                // as StrHashGlobal may allocate a string
+                let entry = global_mapping
+                    .raw_entry_mut()
+                    .from_hash(h, |val| (val.hash == h) && val.str == s);
+
+                match entry {
+                    RawEntryMut::Occupied(entry) => global_idx = *entry.get(),
+                    RawEntryMut::Vacant(entry) => {
+                        // only just now we allocate the string
+                        let key = StrHashGlobal::new(s.into(), h);
+                        entry.insert_with_hasher(h, key, global_idx, |s| s.hash);
+                    }
+                }
+                // safety:
+                // we allocated enough
+                unsafe { local_to_global.push_unchecked(global_idx) }
+            }
+            if global_mapping.len() > u32::MAX as usize {
+                panic!("not more than {} categories supported", u32::MAX)
+            };
+        }
+        // we now know the exact size
+        // no reallocs
+        let mut global_to_local = PlHashMap::with_capacity(local_to_global.len());
+
+        let update_cats = || {
+            if !local_to_global.is_empty() {
+                // when all categorical are null, `local_to_global` is empty and all cats physical values are 0.
+                self.cat_builder.apply_values(|cats| {
+                    for cat in cats {
+                        debug_assert!((*cat as usize) < local_to_global.len());
+                        *cat = *unsafe { local_to_global.get_unchecked(*cat as usize) };
+                    }
+                })
+            };
+        };
+
+        POOL.join(
+            || fill_global_to_local(&local_to_global, &mut global_to_local),
+            update_cats,
+        );
+
+        self.reverse_mapping = RevMappingBuilder::GlobalFinished(global_to_local, values, id)
+    }
+
     /// Appends all the values in a single lock of the global string cache.
     pub fn drain_iter<'a, I>(&mut self, i: I)
     where
         I: IntoIterator<Item = Option<&'a str>>,
     {
         if use_string_cache() {
-            let mut cache = crate::STRING_CACHE.lock_map();
-            let mapping = &mut cache.map;
-            let hb = mapping.hasher().clone();
-
-            for opt_s in i {
-                match opt_s {
-                    Some(s) => {
-                        let h = str::get_hash(s, &hb);
-                        let mut idx = mapping.len() as u32;
-                        // Note that we don't create the StrHashGlobal to search the key in the hashmap
-                        // as StrHashGlobal may allocate a string
-                        let entry = mapping
-                            .raw_entry_mut()
-                            .from_hash(h, |val| (val.hash == h) && val.str == s);
-
-                        match entry {
-                            RawEntryMut::Occupied(entry) => idx = *entry.get(),
-                            RawEntryMut::Vacant(entry) => {
-                                // only just now we allocate the string
-                                let key = StrHashGlobal::new(s.into(), h);
-                                entry.insert_with_hasher(h, key, idx, |s| s.hash);
-                            }
-                        }
-                        // we still need to check if the idx is already stored in our map
-                        self.reverse_mapping.insert(idx, s);
-                        self.array_builder.push(Some(idx));
-                    }
-                    None => {
-                        self.array_builder.push(None);
-                    }
-                }
-            }
+            self.build_global_map_contention(i)
         } else {
-            let mut mapping = PlHashMap::with_capacity(HASHMAP_INIT_SIZE);
-            let hb = mapping.hasher().clone();
-            for opt_s in i {
-                match opt_s {
-                    Some(s) => {
-                        let h = str::get_hash(s, &hb);
-                        let key = StrHashLocal::new(s, h);
-                        let mut idx = mapping.len() as u32;
-
-                        let entry = mapping.raw_entry_mut().from_key_hashed_nocheck(h, &key);
-
-                        match entry {
-                            RawEntryMut::Occupied(entry) => idx = *entry.get(),
-                            RawEntryMut::Vacant(entry) => {
-                                entry.insert_with_hasher(h, key, idx, |s| s.hash);
-                                self.reverse_mapping.insert(idx, s);
-                            }
-                        };
-                        self.array_builder.push(Some(idx));
-                    }
-                    None => {
-                        self.array_builder.push(None);
-                    }
-                }
-            }
-
-            if mapping.len() > u32::MAX as usize {
-                panic!("not more than {} categories supported", u32::MAX)
-            };
+            let _ = self.build_local_map(i, false);
         }
     }
 
     pub fn finish(mut self) -> CategoricalChunked {
         CategoricalChunked::from_chunks_original(
             &self.name,
-            vec![self.array_builder.as_box()],
+            vec![self.cat_builder.as_box()],
             self.reverse_mapping.finish(),
         )
+    }
+}
+
+fn fill_global_to_local(local_to_global: &[u32], global_to_local: &mut PlHashMap<u32, u32>) {
+    let mut local_idx = 0;
+    #[allow(clippy::explicit_counter_loop)]
+    for global_idx in local_to_global {
+        // we know the keys are unique so this is much faster
+        global_to_local.insert_unique_unchecked(*global_idx, local_idx);
+        local_idx += 1;
     }
 }
 

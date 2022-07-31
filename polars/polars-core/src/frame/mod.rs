@@ -32,7 +32,7 @@ mod upstream_traits;
 
 #[cfg(feature = "sort_multiple")]
 use crate::prelude::sort::prepare_argsort;
-use crate::vector_hasher::boost_hash_combine;
+use crate::vector_hasher::_boost_hash_combine;
 #[cfg(feature = "row_hash")]
 use crate::vector_hasher::df_rows_to_hashes_threaded;
 use crate::POOL;
@@ -160,6 +160,11 @@ impl DataFrame {
     }
 
     // reduce monomorphization
+    fn apply_columns(&self, func: &(dyn Fn(&Series) -> Series)) -> Vec<Series> {
+        self.columns.iter().map(|s| func(s)).collect()
+    }
+
+    // reduce monomorphization
     fn apply_columns_par(&self, func: &(dyn Fn(&Series) -> Series + Send + Sync)) -> Vec<Series> {
         POOL.install(|| self.columns.par_iter().map(|s| func(s)).collect())
     }
@@ -193,6 +198,15 @@ impl DataFrame {
             ))
         } else {
             Ok(())
+        }
+    }
+
+    /// Reserve additional slots into the chunks of the series.
+    pub(crate) fn reserve_chunks(&mut self, additional: usize) {
+        for s in &mut self.columns {
+            // Safety
+            // do not modify the data, simply resize.
+            unsafe { s.chunks_mut().reserve(additional) }
         }
     }
 
@@ -278,6 +292,18 @@ impl DataFrame {
         Ok(DataFrame {
             columns: series_cols,
         })
+    }
+
+    /// Creates an empty `DataFrame` usable in a compile time context (such as static initializers).
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use polars_core::prelude::DataFrame;
+    /// static EMPTY: DataFrame = DataFrame::empty();
+    /// ```
+    pub const fn empty() -> Self {
+        DataFrame::new_no_checks(Vec::new())
     }
 
     /// Removes the last `Series` from the `DataFrame` and returns it, or [`None`] if it is empty.
@@ -369,7 +395,7 @@ impl DataFrame {
     /// # Panic
     /// It is the callers responsibility to uphold the contract of all `Series`
     /// having an equal length, if not this may panic down the line.
-    pub fn new_no_checks(columns: Vec<Series>) -> DataFrame {
+    pub const fn new_no_checks(columns: Vec<Series>) -> DataFrame {
         DataFrame { columns }
     }
 
@@ -430,8 +456,8 @@ impl DataFrame {
                         rval.hash(&mut h);
                         let rh2 = h.finish();
                         (
-                            boost_hash_combine(lhash, rhash),
-                            boost_hash_combine(lh2, rh2),
+                            _boost_hash_combine(lhash, rhash),
+                            _boost_hash_combine(lh2, rh2),
                             n,
                         )
                     },
@@ -2170,6 +2196,9 @@ impl DataFrame {
     /// ```
     #[must_use]
     pub fn slice(&self, offset: i64, length: usize) -> Self {
+        if offset == 0 && length == self.height() {
+            return self.clone();
+        }
         let col = self
             .columns
             .iter()
@@ -2180,13 +2209,22 @@ impl DataFrame {
 
     #[must_use]
     pub fn slice_par(&self, offset: i64, length: usize) -> Self {
-        let col = POOL.install(|| {
-            self.columns
-                .par_iter()
-                .map(|s| s.slice(offset, length))
-                .collect::<Vec<_>>()
-        });
-        DataFrame::new_no_checks(col)
+        if offset == 0 && length == self.height() {
+            return self.clone();
+        }
+        DataFrame::new_no_checks(self.apply_columns_par(&|s| s.slice(offset, length)))
+    }
+
+    #[must_use]
+    pub fn _slice_and_realloc(&self, offset: i64, length: usize) -> Self {
+        if offset == 0 && length == self.height() {
+            return self.clone();
+        }
+        DataFrame::new_no_checks(self.apply_columns(&|s| {
+            let mut out = s.slice(offset, length);
+            out.shrink_to_fit();
+            out
+        }))
     }
 
     /// Get the head of the `DataFrame`.

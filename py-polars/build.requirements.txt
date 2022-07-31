@@ -10,7 +10,7 @@ pytz
 types-pytz
 
 # Tooling
-maturin==0.12.19
+maturin==0.13.0
 pytest==7.1.2
 pytest-cov[toml]==3.0.0
 hypothesis==6.49.1
@@ -20,6 +20,8 @@ isort~=5.10.1
 mypy==0.961
 ghp-import==2.1.0
 flake8==4.0.1
+flake8-bugbear==22.7.1
+flake8-docstrings==1.6.0
 sphinx==4.2.0
 pydata-sphinx-theme==0.6.3
 sphinx-panels==0.6.0

@@ -101,7 +101,7 @@ where
     n_rows: Option<usize>,
     // used by error ignore logic
     max_records: Option<usize>,
-    skip_rows: usize,
+    skip_rows_before_header: usize,
     /// Optional indexes of the columns to project
     projection: Option<Vec<usize>>,
     /// Optional column names to project/ select.
@@ -119,6 +119,7 @@ where
     chunk_size: usize,
     low_memory: bool,
     comment_char: Option<u8>,
+    eol_char: u8,
     null_values: Option<NullValues>,
     predicate: Option<Arc<dyn PhysicalIoExpr>>,
     aggregate: Option<&'a [ScanAggregation]>,
@@ -178,9 +179,9 @@ where
         self
     }
 
-    /// Skip the first `n` rows during parsing. The header will be parsed an `n` lines.
+    /// Skip the first `n` rows during parsing. The header will be parsed at `n` lines.
     pub fn with_skip_rows(mut self, skip_rows: usize) -> Self {
-        self.skip_rows = skip_rows;
+        self.skip_rows_before_header = skip_rows;
         self
     }
 
@@ -205,6 +206,11 @@ where
     /// Set the comment character. Lines starting with this character will be ignored.
     pub fn with_comment_char(mut self, comment_char: Option<u8>) -> Self {
         self.comment_char = comment_char;
+        self
+    }
+
+    pub fn with_end_of_line_char(mut self, eol_char: u8) -> Self {
+        self.eol_char = eol_char;
         self
     }
 
@@ -328,7 +334,7 @@ where
             rechunk: true,
             n_rows: None,
             max_records: Some(128),
-            skip_rows: 0,
+            skip_rows_before_header: 0,
             projection: None,
             delimiter: None,
             has_header: true,
@@ -344,6 +350,7 @@ where
             chunk_size: 1 << 18,
             low_memory: false,
             comment_char: None,
+            eol_char: b'\n',
             null_values: None,
             predicate: None,
             aggregate: None,
@@ -407,7 +414,7 @@ where
             let mut csv_reader = CoreReader::new(
                 reader_bytes,
                 self.n_rows,
-                self.skip_rows,
+                self.skip_rows_before_header,
                 self.projection,
                 self.max_records,
                 self.delimiter,
@@ -424,6 +431,7 @@ where
                 self.low_memory,
                 self.comment_char,
                 self.quote_char,
+                self.eol_char,
                 self.null_values,
                 self.predicate,
                 self.aggregate,
@@ -438,7 +446,7 @@ where
             let mut csv_reader = CoreReader::new(
                 reader_bytes,
                 self.n_rows,
-                self.skip_rows,
+                self.skip_rows_before_header,
                 self.projection,
                 self.max_records,
                 self.delimiter,
@@ -455,6 +463,7 @@ where
                 self.low_memory,
                 self.comment_char,
                 self.quote_char,
+                self.eol_char,
                 self.null_values,
                 self.predicate,
                 self.aggregate,
@@ -493,7 +502,7 @@ where
                 }
                 _ => Cow::Owned(Schema::default()),
             };
-            df = parse_dates(df, &*fixed_schema)
+            df = parse_dates(df, &fixed_schema)
         }
 
         cast_columns(&mut df, &to_cast_local, true)?;

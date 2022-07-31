@@ -27,6 +27,9 @@ impl private::PrivateSeriesNumeric for SeriesWrap<DurationChunked> {
 }
 
 impl private::PrivateSeries for SeriesWrap<DurationChunked> {
+    fn compute_len(&mut self) {
+        self.0.compute_len()
+    }
     fn _field(&self) -> Cow<Field> {
         Cow::Owned(self.0.field())
     }
@@ -493,10 +496,9 @@ impl SeriesTrait for SeriesWrap<DurationChunked> {
     }
 
     fn _sum_as_series(&self) -> Series {
-        Int32Chunked::full_null(self.name(), 1)
-            .cast(self.dtype())
-            .unwrap()
+        self.0.sum_as_series().into_duration(self.0.time_unit())
     }
+
     fn max_as_series(&self) -> Series {
         self.0.max_as_series().into_duration(self.0.time_unit())
     }

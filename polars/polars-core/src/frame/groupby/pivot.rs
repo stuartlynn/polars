@@ -17,6 +17,23 @@ pub enum PivotAgg {
     Last,
 }
 
+fn restore_logical_type(s: &Series, logical_type: &DataType) -> Series {
+    // restore logical type
+    match logical_type {
+        #[cfg(feature = "dtype-categorical")]
+        DataType::Categorical(Some(rev_map)) => {
+            let cats = s.u32().unwrap().clone();
+            // safety:
+            // the rev-map comes from these categoricals
+            unsafe {
+                CategoricalChunked::from_cats_and_rev_map_unchecked(cats, rev_map.clone())
+                    .into_series()
+            }
+        }
+        _ => s.cast(logical_type).unwrap(),
+    }
+}
+
 impl DataFrame {
     /// Do a pivot operation based on the group key, a pivot column and an aggregation function on the values column.
     ///
@@ -145,8 +162,7 @@ impl DataFrame {
                         &index[0],
                         row_to_idx.into_iter().map(|(k, _)| k).collect::<Vec<_>>(),
                     );
-                    // restore logical type
-                    let s = s.cast(index_s.dtype()).unwrap();
+                    let s = restore_logical_type(&s, index_s.dtype());
                     Some(vec![s])
                 }
                 _ => None,
@@ -201,8 +217,7 @@ impl DataFrame {
                                     })
                                     .collect::<Vec<_>>(),
                             );
-                            // restore logical type
-                            s.cast(index_s[i].dtype()).unwrap()
+                            restore_logical_type(&s, index_s[i].dtype())
                         })
                         .collect::<Vec<_>>(),
                 ),
@@ -428,7 +443,17 @@ pub struct Pivot<'df> {
 // Takes a `DataFrame` that only consists of the column aggregates that are pivoted by
 // the values in `columns`
 fn finish_logical_type(column: &mut Series, dtype: &DataType) {
-    *column = column.cast(dtype).unwrap();
+    *column = match dtype {
+        #[cfg(feature = "dtype-categorical")]
+        DataType::Categorical(Some(rev_map)) => {
+            let ca = column.u32().unwrap();
+            unsafe {
+                CategoricalChunked::from_cats_and_rev_map_unchecked(ca.clone(), rev_map.clone())
+            }
+            .into_series()
+        }
+        _ => column.cast(dtype).unwrap(),
+    };
 }
 
 impl<'df> Pivot<'df> {

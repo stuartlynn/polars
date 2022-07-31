@@ -23,7 +23,10 @@ def test_error_on_reducing_map() -> None:
 
     with pytest.raises(
         pl.ComputeError,
-        match="A 'map' functions output length must be equal to that of the input length. Consider using 'apply' in favor of 'map'.",
+        match=(
+            "A 'map' functions output length must be equal to that of the input length."
+            " Consider using 'apply' in favor of 'map'."
+        ),
     ):
         df.groupby("id").agg(pl.map(["t", "y"], np.trapz))
 
@@ -74,12 +77,43 @@ def test_join_lazy_on_df() -> None:
 
     with pytest.raises(
         ValueError,
-        match="Expected a `LazyFrame` as join table, got <class 'polars.internals.frame.DataFrame'>",
+        match=(
+            "Expected a `LazyFrame` as join table, got"
+            " <class 'polars.internals.frame.DataFrame'>"
+        ),
     ):
         df_left.lazy().join(df_right, on="Id")
 
     with pytest.raises(
         ValueError,
-        match="Expected a `LazyFrame` as join table, got <class 'polars.internals.frame.DataFrame'>",
+        match=(
+            "Expected a `LazyFrame` as join table, got"
+            " <class 'polars.internals.frame.DataFrame'>"
+        ),
     ):
         df_left.lazy().join_asof(df_right, on="Id")
+
+
+def test_projection_update_schema_missing_column() -> None:
+    with pytest.raises(
+        pl.ComputeError, match="column colC not available in schema Schema:*"
+    ):
+        (
+            pl.DataFrame({"colA": ["a", "b", "c"], "colB": [1, 2, 3]})
+            .lazy()
+            .filter(~pl.col("colC").is_null())
+            .groupby(["colA"])
+            .agg([pl.col("colB").sum().alias("result")])
+            .collect()
+        )
+
+
+def test_not_found_on_rename() -> None:
+    df = pl.DataFrame({"exists": [1, 2, 3]})
+
+    with pytest.raises(pl.NotFoundError):
+        df.rename(
+            {
+                "does_not_exist": "exists",
+            }
+        )

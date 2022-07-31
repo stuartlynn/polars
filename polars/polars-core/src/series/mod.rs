@@ -166,6 +166,17 @@ impl Series {
         Arc::get_mut(&mut self.0).expect("implementation error")
     }
 
+    /// # Safety
+    /// The caller must ensure the length and the data types of `ArrayRef` does not change.
+    pub(crate) unsafe fn chunks_mut(&mut self) -> &mut Vec<ArrayRef> {
+        #[allow(unused_mut)]
+        let mut ca = self._get_inner_mut();
+        let chunks = ca.chunks() as *const Vec<ArrayRef> as *mut Vec<ArrayRef>;
+        // Safety
+        // ca is the owner of `chunks` and this we do not break aliasing rules
+        &mut *chunks
+    }
+
     pub fn set_sorted(&mut self, sorted: IsSorted) {
         let inner = self._get_inner_mut();
         inner._set_sorted(sorted)
@@ -487,13 +498,6 @@ impl Series {
     #[cfg_attr(docsrs, doc(cfg(feature = "dot_product")))]
     pub fn dot(&self, other: &Series) -> Option<f64> {
         (self * other).sum::<f64>()
-    }
-
-    #[cfg(feature = "row_hash")]
-    #[cfg_attr(docsrs, doc(cfg(feature = "row_hash")))]
-    /// Get a hash of this Series
-    pub fn hash(&self, build_hasher: ahash::RandomState) -> UInt64Chunked {
-        UInt64Chunked::from_vec(self.name(), self.0.vec_hash(build_hasher))
     }
 
     /// Get the sum of the Series as a new Series of length 1.
@@ -911,13 +915,13 @@ impl Deref for Series {
     type Target = dyn SeriesTrait;
 
     fn deref(&self) -> &Self::Target {
-        &*self.0
+        self.0.as_ref()
     }
 }
 
 impl<'a> AsRef<(dyn SeriesTrait + 'a)> for Series {
     fn as_ref(&self) -> &(dyn SeriesTrait + 'a) {
-        &*self.0
+        self.0.as_ref()
     }
 }
 

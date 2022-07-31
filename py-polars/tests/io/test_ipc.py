@@ -1,15 +1,14 @@
-# flake8: noqa: W191,E101
 from __future__ import annotations
 
 import io
 import os
 from pathlib import Path
-from typing import List
 
 import pandas as pd
 import pytest
 
 import polars as pl
+from polars.testing import assert_frame_equal_local_categoricals
 
 
 @pytest.fixture
@@ -20,10 +19,10 @@ def compressions() -> list[str]:
 def test_from_to_buffer(df: pl.DataFrame, compressions: list[str]) -> None:
     for compression in compressions:
         buf = io.BytesIO()
-        df.write_ipc(buf, compression=compression)  # type: ignore
+        df.write_ipc(buf, compression=compression)  # type: ignore[arg-type]
         buf.seek(0)
-        read_df = pl.read_ipc(buf)
-        assert df.frame_equal(read_df)
+        read_df = pl.read_ipc(buf, use_pyarrow=False)
+        assert_frame_equal_local_categoricals(df, read_df)
 
 
 def test_from_to_file(
@@ -35,9 +34,9 @@ def test_from_to_file(
     if os.name != "nt":
         for compression in compressions:
             for f in (str(f_ipc), Path(f_ipc)):
-                df.write_ipc(f, compression=compression)  # type: ignore
-                df_read = pl.read_ipc(f)  # type: ignore
-                assert df.frame_equal(df_read)
+                df.write_ipc(f, compression=compression)  # type: ignore[arg-type]
+                df_read = pl.read_ipc(f, use_pyarrow=False)  # type: ignore[arg-type]
+                assert_frame_equal_local_categoricals(df, df_read)
 
 
 def test_select_columns() -> None:
@@ -69,7 +68,7 @@ def test_compressed_simple() -> None:
 
     for compression in compressions:
         f = io.BytesIO()
-        df.write_ipc(f, compression)  # type: ignore
+        df.write_ipc(f, compression)  # type: ignore[arg-type]
         f.seek(0)
 
         df_read = pl.read_ipc(f, use_pyarrow=False)
@@ -81,7 +80,7 @@ def test_ipc_schema(compressions: list[str]) -> None:
 
     for compression in compressions:
         f = io.BytesIO()
-        df.write_ipc(f, compression=compression)  # type: ignore
+        df.write_ipc(f, compression=compression)  # type: ignore[arg-type]
         f.seek(0)
 
         assert pl.read_ipc_schema(f) == {"a": pl.Int64, "b": pl.Utf8, "c": pl.Boolean}
@@ -97,8 +96,8 @@ def test_ipc_schema_from_file(
     if os.name != "nt":
         for compression in compressions:
             for f in (str(f_ipc), Path(f_ipc)):
-                df.write_ipc(f, compression=compression)  # type: ignore
-                assert pl.read_ipc_schema(f) == {  # type: ignore
+                df.write_ipc(f, compression=compression)  # type: ignore[arg-type]
+                assert pl.read_ipc_schema(f) == {  # type: ignore[arg-type]
                     "bools": pl.Boolean,
                     "bools_nulls": pl.Boolean,
                     "int": pl.Int64,
@@ -135,7 +134,7 @@ def test_glob_ipc(io_test_dir: str) -> None:
     if os.name != "nt":
         path = os.path.join(io_test_dir, "small*.ipc")
         assert pl.scan_ipc(path).collect().shape == (3, 12)
-        assert pl.read_ipc(path).shape == (3, 12)
+        assert pl.read_ipc(path, use_pyarrow=False).shape == (3, 12)
 
 
 def test_from_float16() -> None:
@@ -144,4 +143,4 @@ def test_from_float16() -> None:
     f = io.BytesIO()
     pandas_df.to_feather(f)
     f.seek(0)
-    assert pl.read_ipc(f).dtypes == [pl.Float32]
+    assert pl.read_ipc(f, use_pyarrow=False).dtypes == [pl.Float32]

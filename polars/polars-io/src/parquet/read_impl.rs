@@ -140,7 +140,11 @@ fn rg_to_dfs(
         apply_aggregations(&mut df, aggregate)?;
 
         previous_row_count += current_row_count;
-        dfs.push(df)
+        dfs.push(df);
+
+        if remaining_rows == 0 {
+            break;
+        }
     }
     Ok(dfs)
 }
@@ -178,7 +182,8 @@ fn rg_to_dfs_par(
     let dfs = row_groups
         .into_par_iter()
         .map(|(md, local_limit, row_count_start)| {
-            if !read_this_row_group(predicate.as_ref(), file_metadata, schema)? {
+            if local_limit == 0 || !read_this_row_group(predicate.as_ref(), file_metadata, schema)?
+            {
                 return Ok(None);
             }
             // test we don't read the parquet file if this env var is set
@@ -221,6 +226,7 @@ pub fn read_parquet<R: MmapBytesReader>(
     aggregate: Option<&[ScanAggregation]>,
     mut parallel: ParallelStrategy,
     row_count: Option<RowCount>,
+    low_memory: bool,
 ) -> Result<DataFrame> {
     let file_metadata = metadata
         .map(Ok)
@@ -282,6 +288,10 @@ pub fn read_parquet<R: MmapBytesReader>(
     } else {
         let mut df = accumulate_dataframes_vertical(dfs.into_iter())?;
         apply_aggregations(&mut df, aggregate)?;
-        Ok(df.slice(0, limit))
+        Ok(if low_memory {
+            df._slice_and_realloc(0, limit)
+        } else {
+            df.slice_par(0, limit)
+        })
     }
 }

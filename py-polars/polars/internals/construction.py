@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 import warnings
 from datetime import date, datetime, time, timedelta
 from itertools import zip_longest
@@ -29,29 +30,34 @@ from polars.datatypes_constructor import (
 )
 from polars.utils import threadpool_size
 
-if TYPE_CHECKING:  # pragma: no cover
+if TYPE_CHECKING:
     import pandas as pd
 
 try:
     from polars.polars import PyDataFrame, PySeries
 
     _DOCUMENTING = False
-except ImportError:  # pragma: no cover
+except ImportError:
     _DOCUMENTING = True
 
 try:
     import numpy as np
 
     _NUMPY_AVAILABLE = True
-except ImportError:  # pragma: no cover
+except ImportError:
     _NUMPY_AVAILABLE = False
 
 try:
     import pyarrow as pa
 
     _PYARROW_AVAILABLE = True
-except ImportError:  # pragma: no cover
+except ImportError:
     _PYARROW_AVAILABLE = False
+
+if sys.version_info >= (3, 8):
+    from typing import Literal
+else:
+    from typing_extensions import Literal
 
 
 ################################
@@ -60,17 +66,13 @@ except ImportError:  # pragma: no cover
 
 
 def series_to_pyseries(name: str, values: pli.Series) -> PySeries:
-    """
-    Construct a PySeries from a Polars Series.
-    """
+    """Construct a PySeries from a Polars Series."""
     values.rename(name, in_place=True)
     return values.inner()
 
 
 def arrow_to_pyseries(name: str, values: pa.Array, rechunk: bool = True) -> PySeries:
-    """
-    Construct a PySeries from an Arrow array.
-    """
+    """Construct a PySeries from an Arrow array."""
     array = coerce_arrow(values)
     if hasattr(array, "num_chunks"):
         if array.num_chunks > 1:
@@ -91,9 +93,7 @@ def arrow_to_pyseries(name: str, values: pa.Array, rechunk: bool = True) -> PySe
 def numpy_to_pyseries(
     name: str, values: np.ndarray, strict: bool = True, nan_to_null: bool = False
 ) -> PySeries:
-    """
-    Construct a PySeries from a numpy array.
-    """
+    """Construct a PySeries from a numpy array."""
     if not values.flags["C_CONTIGUOUS"]:
         values = np.array(values)
 
@@ -116,6 +116,7 @@ def _get_first_non_none(values: Sequence[Any | None]) -> Any:
     Return the first value from a sequence that isn't None.
 
     If sequence doesn't contain non-None values, return None.
+
     """
     if values is not None:
         return next((v for v in values if v is not None), None)
@@ -123,9 +124,11 @@ def _get_first_non_none(values: Sequence[Any | None]) -> Any:
 
 def sequence_from_anyvalue_or_object(name: str, values: Sequence[Any]) -> PySeries:
     """
-    Last resort conversion. AnyValues are most flexible and if they fail we go for object types
-    """
+    Last resort conversion.
 
+    AnyValues are most flexible and if they fail we go for object types
+
+    """
     try:
         return PySeries.new_from_anyvalues(name, values)
     # raised if we cannot convert to Wrap<AnyValue>
@@ -139,9 +142,7 @@ def sequence_to_pyseries(
     dtype: PolarsDataType | None = None,
     strict: bool = True,
 ) -> PySeries:
-    """
-    Construct a PySeries from a sequence.
-    """
+    """Construct a PySeries from a sequence."""
     dtype_: type | None = None
     nested_dtype: PolarsDataType | type | None = None
     temporal_unit: str | None = None
@@ -182,7 +183,8 @@ def sequence_to_pyseries(
         if dtype_ in py_temporal_types:
             if not _PYARROW_AVAILABLE:  # pragma: no cover
                 raise ImportError(
-                    "'pyarrow' is required for converting a Sequence of date or datetime values to a PySeries."
+                    "'pyarrow' is required for converting a Sequence of date or"
+                    " datetime values to a PySeries."
                 )
             # let arrow infer dtype if not timedelta
             # arrow uses microsecond durations by default, not supported yet.
@@ -286,14 +288,17 @@ def _pandas_series_to_arrow(
     nan_to_none
         Interpret `NaN` as missing values
     min_len
-        in case of null values, this length will be used to create a dummy f64 array (with all values set to null)
+        in case of null values, this length will be used to create a dummy f64 array
+        (with all values set to null)
 
     Returns
     -------
+    Arrow Array
+
     """
     dtype = values.dtype
     if dtype == "object" and len(values) > 0:
-        first_non_none = _get_first_non_none(values.values)  # type: ignore
+        first_non_none = _get_first_non_none(values.values)  # type: ignore[arg-type]
 
         if isinstance(first_non_none, str):
             return pa.array(values, pa.large_utf8(), from_pandas=nan_to_none)
@@ -308,9 +313,7 @@ def _pandas_series_to_arrow(
 def pandas_to_pyseries(
     name: str, values: pd.Series | pd.DatetimeIndex, nan_to_none: bool = True
 ) -> PySeries:
-    """
-    Construct a PySeries from a pandas Series or DatetimeIndex.
-    """
+    """Construct a PySeries from a pandas Series or DatetimeIndex."""
     if not _PYARROW_AVAILABLE:  # pragma: no cover
         raise ImportError(
             "'pyarrow' is required when constructing a PySeries from a pandas Series."
@@ -331,9 +334,7 @@ def pandas_to_pyseries(
 def _handle_columns_arg(
     data: list[PySeries], columns: Sequence[str] | None = None
 ) -> list[PySeries]:
-    """
-    Rename data according to columns argument.
-    """
+    """Rename data according to columns argument."""
     if not columns:
         return data
     else:
@@ -348,9 +349,7 @@ def _handle_columns_arg(
 
 
 def _post_apply_columns(pydf: PyDataFrame, columns: ColumnsType) -> PyDataFrame:
-    """
-    Apply 'columns' param _after_ PyDataFrame creation (if no alternative).
-    """
+    """Apply 'columns' param _after_ PyDataFrame creation (if no alternative)."""
     pydf_columns, pydf_dtypes = pydf.columns(), pydf.dtypes()
     columns, dtypes = _unpack_columns(columns or pydf_columns)
     if columns != pydf_columns:
@@ -372,7 +371,9 @@ def _unpack_columns(
     n_expected: int | None = None,
 ) -> tuple[list[str], dict[str, PolarsDataType]]:
     """
-    Unpack column names and create dtype lookup for any (name,dtype) pairs or schema dict input.
+    Unpack column names and create dtype lookup.
+
+    Works for any (name, dtype) pairs or schema dict input.
     """
     if isinstance(columns, dict):
         columns = list(columns.items())
@@ -398,9 +399,7 @@ def _unpack_columns(
 def dict_to_pydf(
     data: dict[str, Sequence[Any]], columns: ColumnsType | None = None
 ) -> PyDataFrame:
-    """
-    Construct a PyDataFrame from a dictionary of sequences.
-    """
+    """Construct a PyDataFrame from a dictionary of sequences."""
     if columns is not None:
         # the columns arg may also set the dtype of the series
         columns, dtypes = _unpack_columns(columns, lookup_names=data.keys())
@@ -449,11 +448,9 @@ def dict_to_pydf(
 def sequence_to_pydf(
     data: Sequence[Any],
     columns: ColumnsType | None = None,
-    orient: str | None = None,
+    orient: Literal["col", "row"] | None = None,
 ) -> PyDataFrame:
-    """
-    Construct a PyDataFrame from a sequence.
-    """
+    """Construct a PyDataFrame from a sequence."""
     data_series: list[PySeries]
 
     if len(data) == 0:
@@ -489,12 +486,16 @@ def sequence_to_pydf(
             if columns:
                 pydf = _post_apply_columns(pydf, columns)
             return pydf
-        else:
+        elif orient == "col" or orient is None:
             columns, dtypes = _unpack_columns(columns, n_expected=len(data))
             data_series = [
                 pli.Series(columns[i], data[i], dtypes.get(columns[i])).inner()
                 for i in range(len(data))
             ]
+        else:
+            raise ValueError(
+                f"orient must be one of {{'col', 'row', None}}, got {orient} instead."
+            )
 
     else:
         columns, dtypes = _unpack_columns(columns, n_expected=1)
@@ -507,11 +508,9 @@ def sequence_to_pydf(
 def numpy_to_pydf(
     data: np.ndarray,
     columns: ColumnsType | None = None,
-    orient: str | None = None,
+    orient: Literal["col", "row"] | None = None,
 ) -> PyDataFrame:
-    """
-    Construct a PyDataFrame from a numpy ndarray.
-    """
+    """Construct a PyDataFrame from a numpy ndarray."""
     shape = data.shape
     n_columns = (
         0
@@ -551,11 +550,15 @@ def numpy_to_pydf(
                 pli.Series(columns[i], data[:, i], dtypes.get(columns[i])).inner()
                 for i in range(n_columns)
             ]
-        else:
+        elif orient == "col":
             data_series = [
                 pli.Series(columns[i], data[i], dtypes.get(columns[i])).inner()
                 for i in range(n_columns)
             ]
+        else:
+            raise ValueError(
+                f"orient must be one of {{'col', 'row', None}}, got {orient} instead."
+            )
     else:
         raise ValueError("A numpy array should not have more than two dimensions.")
 
@@ -566,9 +569,7 @@ def numpy_to_pydf(
 def arrow_to_pydf(
     data: pa.Table, columns: ColumnsType | None = None, rechunk: bool = True
 ) -> PyDataFrame:
-    """
-    Construct a PyDataFrame from an Arrow Table.
-    """
+    """Construct a PyDataFrame from an Arrow Table."""
     if not _PYARROW_AVAILABLE:  # pragma: no cover
         raise ImportError(
             "'pyarrow' is required when constructing a PyDataFrame from an Arrow Table."
@@ -584,8 +585,8 @@ def arrow_to_pydf(
             ) from e
 
     data_dict = {}
-    # dictionaries cannot be build in different batches (categorical does not allow that)
-    # so we rechunk them and create them separate.
+    # dictionaries cannot be built in different batches (categorical does not allow
+    # that) so we rechunk them and create them separately.
     dictionary_cols = {}
     names = []
     for i, column in enumerate(data):
@@ -630,9 +631,7 @@ def arrow_to_pydf(
 
 
 def series_to_pydf(data: pli.Series, columns: ColumnsType | None = None) -> PyDataFrame:
-    """
-    Construct a PyDataFrame from a Polars Series.
-    """
+    """Construct a PyDataFrame from a Polars Series."""
     data_series = [data.inner()]
     series_name = [s.name() for s in data_series]
     columns, dtypes = _unpack_columns(columns or series_name, n_expected=1)
@@ -651,12 +650,11 @@ def pandas_to_pydf(
     rechunk: bool = True,
     nan_to_none: bool = True,
 ) -> PyDataFrame:
-    """
-    Construct a PyDataFrame from a pandas DataFrame.
-    """
+    """Construct a PyDataFrame from a pandas DataFrame."""
     if not _PYARROW_AVAILABLE:  # pragma: no cover
         raise ImportError(
-            "'pyarrow' is required when constructing a PyDataFrame from a pandas DataFrame."
+            "'pyarrow' is required when constructing a PyDataFrame from a pandas"
+            " DataFrame."
         )
     length = data.shape[0]
     arrow_dict = {
